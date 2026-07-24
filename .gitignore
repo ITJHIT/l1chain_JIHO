@@ -1,0 +1,25 @@
+# Go build outputs
+/l1
+/l1.exe
+l1
+l1.exe
+*.exe
+*.test
+*.out
+
+# local node data
+*.db
+/data/
+
+# Node / Next.js (web/ also has its own .gitignore)
+web/node_modules/
+web/.next/
+web/out/
+web/test-results/
+web/playwright-report/
+web/e2e-artifacts/
+web/.l1node/
+
+# OS / editor
+.DS_Store
+Thumbs.db

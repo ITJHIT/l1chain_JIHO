@@ -1,0 +1,162 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M3",
+  "title": "M3 StackVM red-team adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-07-24",
+  "lane": "executor-qa-red-team (18-M3RedTeam)",
+  "test_packages": [
+    "l1chain/vm",
+    "l1chain/chain"
+  ],
+  "test_files": [
+    "vm/adversarial_test.go",
+    "chain/adversarial_test.go"
+  ],
+  "principle": "Each case drives malicious or malformed contract bytecode through the REAL StackVM.Execute path (vm) and/or the full ApplyTx -> applyContractTx -> StackVM + AddBlock StateRoot re-derivation pipeline (chain) — the same entrypoints block validation uses. Every case asserts the four M3 VM safety invariants under attack: (1) no crash/panic, (2) gas-bounded termination (GasUsed==GasLimit on OOG, never a hang), (3) no state corruption (reverting/OOG frames commit nothing; no cross-contract storage leak or clobber), (4) determinism (identical input+state -> identical StateRoot across independent runs and across mining vs validation derivation). No production vm/chain/state code was modified and no validation was weakened; tests only ADD coverage and reuse in-package helpers.",
+  "new_test_names": [
+    "TestAdvVM01InfiniteLoopOutOfGas",
+    "TestAdvVM02StackUnderflowAndOverflow",
+    "TestAdvVM03InvalidJumpDestinations",
+    "TestAdvVM04StorageIsolation",
+    "TestAdvVM05OutOfGasMidExecutionRevertsSStore",
+    "TestAdvVM06DeterministicRepeatedExecution",
+    "TestAdvVM07ReentrancyBoundedByDepthAndGas",
+    "TestAdvVM08TruncatedPushAndCalldataBounds",
+    "TestAdvChain05OOGCallAdvancesNonceConsumesGasRevertsStorage",
+    "TestAdvChain06AdversarialContractMiningEqualsValidation"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-1",
+      "test": "TestAdvVM01InfiniteLoopOutOfGas",
+      "scenario": "Bytecode SSTORE slot0=7 then JUMPDEST; PUSH1 5; JUMP -> jumps back forever (unbounded loop). GasLimit 1,000,000.",
+      "expected": "Terminates via ErrOutOfGas (not a hang); GasUsed == GasLimit; the whole message reverts so the pre-loop SSTORE (slot0=7) is wiped back to zero.",
+      "verdict": "passed",
+      "receipt_evidence": "Receipt{Success:false, Err:ErrOutOfGas, GasUsed:1000000}; st.GetStorage(to,slot0)==0x00 (reverted)."
+    },
+    {
+      "id": "case-2",
+      "test": "TestAdvVM02StackUnderflowAndOverflow",
+      "scenario": "Underflow: ADD/SUB/MUL/SSTORE/JUMP and PUSH1;SSTORE on an empty/short stack. Overflow: 1025 straight-line PUSH1 ops (> MaxStack 1024).",
+      "expected": "Underflow variants revert with ErrStackUnderflow; overflow reverts with ErrStackOverflow. No panic in any variant.",
+      "verdict": "passed",
+      "receipt_evidence": "6/6 underflow codes -> Receipt{Success:false, Err:ErrStackUnderflow}; overflow -> Receipt{Success:false, Err:ErrStackOverflow}; no panic."
+    },
+    {
+      "id": "case-3",
+      "test": "TestAdvVM03InvalidJumpDestinations",
+      "scenario": "JUMP to non-JUMPDEST (offset=STOP), JUMP out of bounds (offset 255), JUMP into PUSH2 immediate data (0x5b byte that is NOT a real JUMPDEST), and JUMPI taken to a bad destination.",
+      "expected": "All four revert with ErrInvalidJump; jumping into PUSH-data 0x5b is rejected (validJumpdests excludes immediates); no panic / no out-of-range indexing.",
+      "verdict": "passed",
+      "receipt_evidence": "4/4 -> Receipt{Success:false, Err:ErrInvalidJump}; no panic."
+    },
+    {
+      "id": "case-4",
+      "test": "TestAdvVM04StorageIsolation",
+      "scenario": "Contract A writes slot0=42 (committed). Contract B (different address) SLOADs slot0 and RETURNs it.",
+      "expected": "B reads its OWN storage (zero), NOT A's 42 -> no cross-contract leakage; A's slot0 stays 42 and B's slot0 stays 0 -> no cross-contract corruption.",
+      "verdict": "passed",
+      "receipt_evidence": "A.slot0==0x2a; B.ReturnData==32 zero bytes (SLOAD saw 0); A.slot0 still 0x2a after B ran; B.slot0==0."
+    },
+    {
+      "id": "case-5",
+      "test": "TestAdvVM05OutOfGasMidExecutionRevertsSStore + TestAdvChain05OOGCallAdvancesNonceConsumesGasRevertsStorage",
+      "scenario": "Contract SSTOREs slot0=7 (affordable) then SSTOREs slot1=9 which exhausts gas mid-execution. Run at VM level (GasLimit 6000) and through the chain as a deployed contract call (callGas 6000).",
+      "expected": "VM: whole message reverts -> slot0 and slot1 both unchanged (zero), GasUsed==GasLimit. Chain/node: the already-applied SSTORE is reverted, the sender nonce still advances, and the full gas budget is consumed (no refund on OOG).",
+      "verdict": "passed",
+      "receipt_evidence": "VM: Receipt{Success:false, Err:ErrOutOfGas, GasUsed:6000}; slot0==slot1==0. Chain: slot0==slot1==0; sender nonce 1->2; balance = (10,000,000 - GasCreate) - 6000 (full call gas consumed)."
+    },
+    {
+      "id": "case-6",
+      "test": "TestAdvVM06DeterministicRepeatedExecution + TestAdvChain06AdversarialContractMiningEqualsValidation",
+      "scenario": "Non-trivial contract exercising arithmetic (5+3) + SSTORE (slot0=8) + inter-contract CALL of a counter. Run the SAME execution twice on fresh states (VM), and mine deploy/deploy/call blocks then replay them via AddBlock on a FRESH same-genesis chain (chain).",
+      "expected": "VM: two independent runs produce identical StateRoot. Chain: mining-side derivation (buildBlock) and validation-side re-derivation (AddBlock on chain B) yield identical StateRoot; any nondeterminism would cause AddBlock to reject with ErrBadStateRoot. Post-state: caller slot0==8, callee slot0==1.",
+      "verdict": "passed",
+      "receipt_evidence": "VM: root1==root2. Chain A/B: all blocks accepted on both chains; cA.StateRoot()==cB.StateRoot(); caller.slot0==8, callee.slot0==1."
+    },
+    {
+      "id": "case-7",
+      "test": "TestAdvVM07ReentrancyBoundedByDepthAndGas",
+      "scenario": "Contract A CALLs B; B CALLs back into A -> mutual recursion with no base case (reentrancy). (a) generous gas, (b) tight gas budget, (c) determinism check.",
+      "expected": "(a) With generous gas the recursion terminates at the call-depth limit (deeper CALLs push 0 without executing) and unwinds to Success -> no infinite recursion, no panic. (b) With a tight budget the shared gas meter bounds it -> ErrOutOfGas, GasUsed==GasLimit, no panic. (c) The depth-bounded run yields identical StateRoot across independent runs.",
+      "verdict": "passed",
+      "receipt_evidence": "(a) Receipt{Success:true}; (b) Receipt{Success:false, Err:ErrOutOfGas, GasUsed:100000}; (c) root1==root2; no panic in any sub-case."
+    },
+    {
+      "id": "case-8",
+      "test": "TestAdvVM08TruncatedPushAndCalldataBounds",
+      "scenario": "(a) PUSH32 with only 1 immediate byte before end-of-code (truncated). (b) CALLDATALOAD at offset 255 with empty calldata. (c) CALLDATALOAD at offset 0 with 4-byte calldata (window straddles the end).",
+      "expected": "(a) Missing immediate bytes zero-padded; execution completes with no out-of-range panic. (b) Returns a 32-byte zero word. (c) Returns the in-range bytes (0xaabbccdd) followed by zero padding. No slice out-of-range panic in any variant.",
+      "verdict": "passed",
+      "receipt_evidence": "(a) Receipt{Success:true}; (b) ReturnData==32 zero bytes; (c) ReturnData==aabbccdd000...0; no panic."
+    }
+  ],
+  "summary": {
+    "total_cases": 8,
+    "passed": 8,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No adversarial case revealed a defect. Malicious/malformed bytecode could not crash the node (no panics), could not exceed its gas budget (unbounded loops and reentrancy terminate via ErrOutOfGas with GasUsed==GasLimit or via the call-depth limit), could not read or corrupt another contract's storage (SLOAD isolation + no cross-contract clobber), and produced deterministic results (identical StateRoot across repeated executions and across mining vs validation re-derivation). OOG/reverting frames commit nothing while the sender nonce still advances and gas is consumed at the chain level. Truncated PUSH immediates and out-of-range CALLDATALOAD are zero-padded per spec with no out-of-range indexing."
+  },
+  "go_vet": {
+    "command": "go vet ./...",
+    "result": "pass"
+  },
+  "go_test_vm_verbose": {
+    "command": "go test ./vm/ -v",
+    "result": "pass",
+    "raw": [
+      "--- PASS: TestAdvVM01InfiniteLoopOutOfGas (0.02s)",
+      "--- PASS: TestAdvVM02StackUnderflowAndOverflow (0.00s)",
+      "--- PASS: TestAdvVM03InvalidJumpDestinations (0.00s)",
+      "--- PASS: TestAdvVM04StorageIsolation (0.00s)",
+      "--- PASS: TestAdvVM05OutOfGasMidExecutionRevertsSStore (0.00s)",
+      "--- PASS: TestAdvVM06DeterministicRepeatedExecution (0.00s)",
+      "--- PASS: TestAdvVM07ReentrancyBoundedByDepthAndGas (0.04s)",
+      "--- PASS: TestAdvVM08TruncatedPushAndCalldataBounds (0.00s)",
+      "--- PASS: TestArithmeticAndComparisonOpcodes (0.00s)",
+      "--- PASS: TestWord256OverflowWraps (0.00s)",
+      "--- PASS: TestJumpAndJumpi (0.00s)",
+      "--- PASS: TestCalldataOpcodes (0.00s)",
+      "--- PASS: TestCallValue (0.00s)",
+      "--- PASS: TestStorageRoundTrip (0.00s)",
+      "--- PASS: TestGasAccountingPerOpcode (0.00s)",
+      "--- PASS: TestOutOfGasRevertsStorage (0.00s)",
+      "--- PASS: TestStackUnderflowGuarded (0.00s)",
+      "--- PASS: TestStackOverflowGuarded (0.00s)",
+      "--- PASS: TestCallIntoAnotherContract (0.00s)",
+      "--- PASS: TestCallDepthLimit (0.00s)",
+      "--- PASS: TestContractCreation (0.00s)",
+      "--- PASS: TestContractCreationOutOfGas (0.00s)",
+      "ok  \tl1chain/vm\t0.837s"
+    ]
+  },
+  "go_test_chain_adversarial": {
+    "command": "go test ./chain/ -v -run TestAdvChain",
+    "result": "pass",
+    "raw": [
+      "--- PASS: TestAdvChain05OOGCallAdvancesNonceConsumesGasRevertsStorage (0.00s)",
+      "--- PASS: TestAdvChain06AdversarialContractMiningEqualsValidation (0.00s)",
+      "ok  \tl1chain/chain\t0.839s"
+    ]
+  },
+  "go_test_all_summary": {
+    "command": "go test ./...",
+    "result": "pass",
+    "raw": [
+      "ok  \tl1chain/chain\t1.367s",
+      "ok  \tl1chain/cmd/l1\t(cached)",
+      "ok  \tl1chain/consensus\t(cached)",
+      "ok  \tl1chain/core\t(cached)",
+      "ok  \tl1chain/node\t(cached)",
+      "ok  \tl1chain/p2p\t(cached)",
+      "ok  \tl1chain/redteam\t(cached)",
+      "ok  \tl1chain/rpc\t(cached)",
+      "ok  \tl1chain/state\t(cached)",
+      "ok  \tl1chain/store\t(cached)",
+      "ok  \tl1chain/vm\t0.956s",
+      "ok  \tl1chain/wallet\t(cached)"
+    ]
+  }
+}

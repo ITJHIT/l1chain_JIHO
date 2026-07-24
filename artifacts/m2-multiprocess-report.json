@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "kind": "cli-multiprocess-convergence-report",
+  "test": "TestMultiprocessConvergence",
+  "surface": "cli",
+  "scenario": "3 separate l1 node OS processes with identical genesis-timestamp/alloc/difficulty; node1 sole miner, node2/3 dial via --peers; poll RPC getChainHead until all 3 share same hash at height>=2",
+  "result": "passed",
+  "observed": "3 OS processes converged to same head hash at height 13",
+  "verifiedBy": "leader independent go test -run Multiprocess ./cmd/l1/",
+  "rawTail": ""
+}

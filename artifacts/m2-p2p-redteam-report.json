@@ -1,0 +1,125 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M2",
+  "title": "M2 P2P networking red-team adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-07-24",
+  "lane": "executor-qa-red-team (12-M2RedTeam)",
+  "test_package": "l1chain/p2p",
+  "test_files": [
+    "p2p/adversarial_test.go"
+  ],
+  "principle": "Each case drives a malicious or broken peer against an honest node over REAL libp2p hosts + GossipSub (the same stack as p2p_test.go). Every case asserts the honest node REJECTS the attack while staying alive, un-corrupted, and non-diverged, then proves liveness by accepting a subsequent VALID block/tx. Tests use only exported l1chain APIs plus in-package test access to gossip topics; no production p2p/node/chain code was modified and no validation was weakened. Every network block still flows through node.AcceptExternalBlock -> chain.AddBlock.",
+  "new_test_names": [
+    "TestAdvP2P01InvalidPoWGossiped",
+    "TestAdvP2P02ForgedSignatureTxGossiped",
+    "TestAdvP2P03TamperedStateRootGossiped",
+    "TestAdvP2P04MaliciousSyncResponder",
+    "TestAdvP2P05DuplicateReplayFlood",
+    "TestAdvP2P06UnknownParentOrphanGossip",
+    "TestAdvP2P07JunkTopicPayload"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "advp2p-01",
+      "test": "TestAdvP2P01InvalidPoWGossiped",
+      "scenario": "Malicious peer gossips a well-formed block (correct parent/height/tx root) whose Difficulty is bumped to an unreachable 250 leading-zero-bits so its hash cannot meet the target.",
+      "expected_handling": "AcceptExternalBlock rejects with chain.ErrBadPoW; honest Head stays at genesis (height 0) through 10 gossip re-deliveries; node stays alive and then accepts a subsequent VALID height-1 block over the network.",
+      "verdict": "passed",
+      "observed": "direct submit -> ErrBadPoW; log 'drop invalid block h=1: chain: block hash does not meet difficulty' x10; head unchanged; valid block adopted (converged)."
+    },
+    {
+      "id": "advp2p-02",
+      "test": "TestAdvP2P02ForgedSignatureTxGossiped",
+      "scenario": "Tx validly signed by key X but From overwritten to a different address (mismatched From/signature) is gossiped on the l1/txs topic.",
+      "expected_handling": "SubmitTx rejects with node.ErrBadSignature; forged tx never enters the mempool via gossip; a subsequently gossiped VALID faucet tx IS admitted, and the mined block contains exactly that one valid tx (forged tx absent).",
+      "verdict": "passed",
+      "observed": "direct SubmitTx -> ErrBadSignature; mempool 0 after 10 forged gossips; valid tx admitted (mempool 1); mined block Txs==[validTx]."
+    },
+    {
+      "id": "advp2p-03",
+      "test": "TestAdvP2P03TamperedStateRootGossiped",
+      "scenario": "Valid block with its Header.StateRoot tampered and re-mined so PoW passes but the re-derived state root cannot match; gossiped to honest node.",
+      "expected_handling": "AcceptExternalBlock rejects with chain.ErrBadStateRoot; Head stays at genesis through 10 gossip re-deliveries; node accepts a subsequent VALID block.",
+      "verdict": "passed",
+      "observed": "direct submit -> ErrBadStateRoot; log 'drop invalid block h=1: chain: state root mismatch' x10; head unchanged; valid block adopted."
+    },
+    {
+      "id": "advp2p-04",
+      "test": "TestAdvP2P04MaliciousSyncResponder",
+      "scenario": "A peer answers the /l1/sync/1.0.0 stream with (a) raw non-gob garbage bytes, (b) a valid-gob but invalid (bad-PoW) block, (c) an out-of-order/unknown-parent height-2 block.",
+      "expected_handling": "The requesting honest node applies synced blocks via AcceptExternalBlock; garbage decodes to a graceful stream end with no adoption; invalid/out-of-order blocks make syncFrom return an error and abort; in ALL sub-cases Head stays at genesis and the node never crashes on malformed stream data.",
+      "verdict": "passed",
+      "observed": "(a) Resync returns cleanly, head unchanged; (b) Resync returns non-nil error (ErrBadPoW), head unchanged; (c) Resync returns non-nil error (ErrUnknownParent), head unchanged; no panic."
+    },
+    {
+      "id": "advp2p-05",
+      "test": "TestAdvP2P05DuplicateReplayFlood",
+      "scenario": "The same VALID block is delivered many times: 1 initial accept + 50 direct replays + 50 gossip re-deliveries of the identical encoded block.",
+      "expected_handling": "First accept advances Head to height 1; every duplicate AcceptExternalBlock returns nil (idempotent, ErrDuplicateBlock mapped to nil); Head stays at height 1 with the correct hash; the coinbase reward is credited EXACTLY once (balance == chain.BlockReward=50, not doubled); no panic.",
+      "verdict": "passed",
+      "observed": "50/50 duplicate accepts returned nil; head height 1 stable; coinbase balance == 50 after both direct and gossip floods (no double application)."
+    },
+    {
+      "id": "advp2p-06",
+      "test": "TestAdvP2P06UnknownParentOrphanGossip",
+      "scenario": "An orphan block (height 2) whose parent (height 1) the honest node lacks is gossiped by a peer that cannot serve the missing parent (its own chain is at genesis).",
+      "expected_handling": "AcceptExternalBlock returns chain.ErrUnknownParent; the node attempts sync from the relaying peer, cannot obtain the parent, and DROPS the orphan rather than applying it out of order; Head stays at genesis. Once the parent is subsequently delivered, the node converges to height 2 in the correct order.",
+      "verdict": "passed",
+      "observed": "direct submit -> ErrUnknownParent; log 'drop block h=2 after sync: chain: unknown parent block'; head stayed 0 during orphan-only flood; converged to height 2 after ordered parent+child delivery."
+    },
+    {
+      "id": "advp2p-07",
+      "test": "TestAdvP2P07JunkTopicPayload",
+      "scenario": "Random / empty / garbage byte payloads published to both l1/blocks and l1/txs topics.",
+      "expected_handling": "store.DecodeBlock / decodeTx fail; the read loops log and drop each undecodable message and keep running; Head unchanged (genesis), mempool empty; a subsequent VALID block is still accepted (read loops survived).",
+      "verdict": "passed",
+      "observed": "logs 'drop undecodable block/tx: gob: encoded unsigned integer out of range | unexpected EOF | EOF'; head unchanged; mempool 0; valid block adopted afterward."
+    }
+  ],
+  "summary": {
+    "total_cases": 7,
+    "passed": 7,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No adversarial case revealed a defect. A malicious or broken peer could not corrupt an honest node's chain, could not make it adopt an invalid/out-of-order/orphan/forged artifact, and could not crash it. Every network block was validated through node.AcceptExternalBlock -> chain.AddBlock (PoW, tx merkle root, re-derived state root, parent linkage). Duplicate delivery is idempotent with single reward application; junk and malformed sync streams are handled gracefully."
+  },
+  "go_vet": {
+    "command": "go vet ./...",
+    "result": "pass"
+  },
+  "go_test_p2p_verbose": {
+    "command": "go test ./p2p/ -v",
+    "result": "pass",
+    "raw": [
+      "--- PASS: TestAdvP2P01InvalidPoWGossiped (2.37s)",
+      "--- PASS: TestAdvP2P02ForgedSignatureTxGossiped (2.29s)",
+      "--- PASS: TestAdvP2P03TamperedStateRootGossiped (2.28s)",
+      "--- PASS: TestAdvP2P04MaliciousSyncResponder (0.07s)",
+      "--- PASS: TestAdvP2P05DuplicateReplayFlood (2.15s)",
+      "--- PASS: TestAdvP2P06UnknownParentOrphanGossip (3.44s)",
+      "--- PASS: TestAdvP2P07JunkTopicPayload (2.30s)",
+      "--- PASS: TestThreeNodeConvergence (0.51s)",
+      "--- PASS: TestPartitionReconvergence (0.68s)",
+      "ok  \tl1chain/p2p\t19.272s"
+    ]
+  },
+  "go_test_all_summary": {
+    "command": "go test ./...",
+    "result": "pass",
+    "raw": [
+      "ok  \tl1chain/chain\t(cached)",
+      "?   \tl1chain/cmd/l1\t[no test files]",
+      "ok  \tl1chain/consensus\t(cached)",
+      "ok  \tl1chain/core\t(cached)",
+      "ok  \tl1chain/node\t2.880s",
+      "ok  \tl1chain/p2p\t19.656s",
+      "ok  \tl1chain/redteam\t(cached)",
+      "ok  \tl1chain/rpc\t2.127s",
+      "ok  \tl1chain/state\t(cached)",
+      "ok  \tl1chain/store\t(cached)",
+      "?   \tl1chain/vm\t[no test files]",
+      "ok  \tl1chain/wallet\t(cached)"
+    ]
+  }
+}

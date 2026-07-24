@@ -1,0 +1,138 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M4",
+  "title": "M4 go-ethereum-embedded EVM / ERC-20 red-team adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-07-24",
+  "lane": "executor-qa-red-team (21-M4RedTeam)",
+  "target": "evm/runtime.go Harness (real github.com/ethereum/go-ethereum v1.17.4 vm.EVM over a genuine keccak/MPT state) + evm/erc20_fixture.go standard ERC-20",
+  "test_packages": ["l1chain/evm"],
+  "test_files": ["evm/adversarial_test.go"],
+  "production_code_modified": false,
+  "principle": "Each case drives a malicious or malformed contract / calldata through the REAL Harness.Deploy / Harness.Call path (github.com/ethereum/go-ethereum/core/vm executing over state.StateDB backed by rawdb memory + triedb = real keccak256 MPT) — the same entrypoints M4 uses. Every case asserts the four EVM safety invariants under attack: (1) no harness crash/panic (adversarial calls are wrapped in a recover() guard that turns any panic into an explicit test failure), (2) gas-bounded termination (unbounded execution ends via ErrOutOfGas with gasUsed==budget, never a hang), (3) reverting / OOG frames leave state unchanged (both balances AND the totalSupply invariant), (4) determinism (identical balances AND identical MPT state root across independent fresh states). No production evm/ code was modified; the suite only ADDS tests and reuses in-package helpers (deployToken, balanceOf, Encode*/Decode*).",
+  "new_test_names": [
+    "TestAdvEVM01OutOfGasDeployAndCall",
+    "TestAdvEVM02SelfTransferAndZeroTransfer",
+    "TestAdvEVM03OverspendRevertPreservesSupply",
+    "TestAdvEVM04InfiniteLoopGasBounded",
+    "TestAdvEVM05CallEmptyCodeAddress",
+    "TestAdvEVM06RecursionBoundedByDepthAndGas",
+    "TestAdvEVM07DeterministicAdversarialSequence",
+    "TestAdvEVM08MalformedCalldata"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-1",
+      "test": "TestAdvEVM01OutOfGasDeployAndCall",
+      "scenario": "(a) Deploy the ERC-20 creation bytecode with a tiny 50-gas budget. (b) Deploy normally, then Call transfer(recipient,1) with a tiny 50-gas budget.",
+      "expected": "Both return an OOG error (no panic). Deploy leaves NO partial runtime code at the derived address. Call leaves deployer/recipient balances AND totalSupply unchanged.",
+      "verdict": "passed",
+      "receipt_evidence": "Deploy err='out of gas: not enough gas for reentrancy sentry'; h.Code(addr) len==0 (no partial contract). Call err='out of gas'; balanceOf(deployer)/balanceOf(recipient)/totalSupply all unchanged."
+    },
+    {
+      "id": "case-2",
+      "test": "TestAdvEVM02SelfTransferAndZeroTransfer",
+      "scenario": "(a) transfer(deployer, 1000) — transfer to self. (b) transfer(recipient, 0) — zero-value transfer.",
+      "expected": "Both succeed (return true). Self-transfer is net-zero: deployer balance unchanged. Zero-transfer credits nothing: deployer unchanged, recipient stays 0. totalSupply unchanged. No storage corruption.",
+      "verdict": "passed",
+      "receipt_evidence": "self-transfer ret!=0, balanceOf(deployer)==1000000000000000000000000 (unchanged); zero-transfer ret!=0, deployer unchanged, recipient==0; totalSupply==1000000000000000000000000."
+    },
+    {
+      "id": "case-3",
+      "test": "TestAdvEVM03OverspendRevertPreservesSupply",
+      "scenario": "transfer(recipient, initialSupply+1) — amount strictly greater than the deployer balance. Extends the existing overspend test to also assert the totalSupply conservation invariant.",
+      "expected": "Reverts (execution reverted); deployer AND recipient balances unchanged; totalSupply unchanged and still == initial supply (no tokens minted/burned by a failed transfer).",
+      "verdict": "passed",
+      "receipt_evidence": "err='execution reverted'; balanceOf(deployer)/balanceOf(recipient) unchanged; totalSupply==1000000000000000000000000==ERC20InitialSupply."
+    },
+    {
+      "id": "case-4",
+      "test": "TestAdvEVM04InfiniteLoopGasBounded",
+      "scenario": "Deploy a malicious contract whose runtime is 'JUMPDEST; PUSH1 0; JUMP' (0x5b600056) — an unconditional infinite loop — via a minimal CODECOPY/RETURN constructor, then Call it with a 500,000-gas budget.",
+      "expected": "Deploy succeeds with exactly 4 bytes runtime. Call terminates via ErrOutOfGas (NOT a hang), consuming essentially the whole budget. No panic.",
+      "verdict": "passed",
+      "receipt_evidence": "runtime code len==4; Call err='out of gas', gasUsed==500000/500000 (fully consumed, bounded). No panic (recover guard clean)."
+    },
+    {
+      "id": "case-5",
+      "test": "TestAdvEVM05CallEmptyCodeAddress",
+      "scenario": "Call an address (0x...deadbeef) that has no deployed code, with 4 bytes of calldata.",
+      "expected": "Per EVM semantics a call into an empty-code account is a no-op success returning empty data. err==nil, returndata length 0, no panic.",
+      "verdict": "passed",
+      "receipt_evidence": "precondition Code(addr) len==0; Call err==nil, retLen==0; no panic."
+    },
+    {
+      "id": "case-6",
+      "test": "TestAdvEVM06RecursionBoundedByDepthAndGas",
+      "scenario": "Deploy an attacker contract whose runtime CALLs back into its OWN address forwarding all gas (self-reentrancy with no base case): PUSH1 0 x5; ADDRESS; GAS; CALL; POP; STOP. Run (a) with 50,000,000 gas, (b) with a tight 200,000 gas, (c) determinism repeat.",
+      "expected": "Reentrancy is bounded by TWO independent limits — the 1024 call-depth cap AND the EIP-150 63/64 gas-forwarding rule — so it ALWAYS terminates: (a) generous gas unwinds to success at the depth limit; (b) a tight budget also terminates cleanly with gasUsed<=budget (no hang, no crash); (c) the generous run yields an identical MPT state root on an independent fresh state. No panic in any sub-case.",
+      "verdict": "passed",
+      "receipt_evidence": "(a) success (err==nil) via depth-limit unwind; (b) bounded termination err==nil gasUsed==25542/200000 (<=budget, no hang); (c) rootA==rootC==0xcffd723dcb9cfaef060fcb34a14c48ccd22c97cf3d1ba969ea675e72e688aa1e. NOTE: self-CALL reentrancy legitimately unwinds to success (not OOG) because the 63/64 rule starves inner frames before the top frame runs out; the invariant proven is BOUNDED, DETERMINISTIC, NON-HANGING termination, not a specific error class."
+    },
+    {
+      "id": "case-7",
+      "test": "TestAdvEVM07DeterministicAdversarialSequence",
+      "scenario": "On two independent fresh states, deploy the ERC-20 and run the SAME 5-step call sequence: transfer 100 to recipient (ok), transfer 250 to attacker (ok), transfer initialSupply+1 to recipient (REVERT/overspend), transfer 50 to recipient (ok), transfer 999 to self (net-zero). Compare final balances AND MPT state root.",
+      "expected": "Identical final balances AND identical MPT state root across both runs; the reverting middle step leaves no residue; net effect: recipient=150, attacker=250, deployer=initialSupply-400.",
+      "verdict": "passed",
+      "receipt_evidence": "run1==run2 for all balances; root1==root2==0x6838325f33cb7750833514c9c1c4fe72f08556b4ccea1d9432e47479c861bece; deployer=999999999999999999999600 (=initialSupply-400), recipient=150, attacker=250."
+    },
+    {
+      "id": "case-8",
+      "test": "TestAdvEVM08MalformedCalldata",
+      "scenario": "(a) empty calldata; (b) 2-byte truncated selector 0xa905; (c) balanceOf with a 10-byte (truncated) address arg; (d) transfer with only the 4-byte selector (no to/amount).",
+      "expected": "(a)+(b) the dispatcher reads a non-matching selector (zero-padded) and hits the fallback revert. (c) CALLDATALOAD zero-pads beyond calldata end -> reads a well-formed zero-padded slot, returns 0, no slice-out-of-range panic. (d) both args zero-pad to zero -> transfers 0 to address(0), a net-zero no-op; deployer balance + totalSupply unchanged. No panic in any variant.",
+      "verdict": "passed",
+      "receipt_evidence": "(a) err='execution reverted'; (b) err='execution reverted'; (c) err==nil ret decodes to 0, no panic; (d) deployer balance unchanged, totalSupply unchanged, no panic."
+    }
+  ],
+  "summary": {
+    "total_cases": 8,
+    "passed": 8,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No adversarial case revealed a defect. Malicious/malformed contracts and calldata could not crash the harness (all recover() guards clean, zero panics), could not exceed their gas budget (the straight-line infinite loop terminates via ErrOutOfGas with gasUsed==budget; self-reentrancy terminates via the 1024 depth cap + EIP-150 63/64 gas-forwarding rule — no hang in either), could not corrupt state on failure (OOG deploy leaves no partial contract; reverting/OOG transfers leave both balances AND the totalSupply invariant unchanged), and produced deterministic results (identical balances and identical MPT state root across independent fresh states, including a revert-containing sequence). Self-transfer and zero-transfer preserve conservation; truncated calldata is zero-padded per ABI with no out-of-range indexing. IMPLEMENTATION NOTE: during development, case-6(b) initially asserted that a tight-gas reentrancy run must return ErrOutOfGas; observation showed it instead unwinds to success because the 63/64 forwarding rule starves inner frames first. This was a wrong test assumption, NOT a harness defect — the assertion was corrected to prove the true invariant (bounded, deterministic, non-hanging termination). No production code was touched."
+  },
+  "acceptance": {
+    "go_vet": { "command": "go vet ./...", "result": "pass" },
+    "go_test_evm_verbose": {
+      "command": "go test ./evm/ -v",
+      "result": "pass",
+      "raw": [
+        "--- PASS: TestAdvEVM01OutOfGasDeployAndCall (0.00s)",
+        "--- PASS: TestAdvEVM02SelfTransferAndZeroTransfer (0.00s)",
+        "--- PASS: TestAdvEVM03OverspendRevertPreservesSupply (0.00s)",
+        "--- PASS: TestAdvEVM04InfiniteLoopGasBounded (0.00s)",
+        "--- PASS: TestAdvEVM05CallEmptyCodeAddress (0.00s)",
+        "--- PASS: TestAdvEVM06RecursionBoundedByDepthAndGas (0.01s)",
+        "--- PASS: TestAdvEVM07DeterministicAdversarialSequence (0.00s)",
+        "--- PASS: TestAdvEVM08MalformedCalldata (0.00s)",
+        "--- PASS: TestDeployERC20 (0.00s)",
+        "--- PASS: TestInitialSupplyMintedToDeployer (0.00s)",
+        "--- PASS: TestTransferUpdatesKeccakMappedStorage (0.00s)",
+        "--- PASS: TestTransferMoreThanBalanceReverts (0.00s)",
+        "--- PASS: TestDeterministicAcrossFreshStates (0.00s)",
+        "ok  \tl1chain/evm\t1.693s"
+      ]
+    },
+    "go_test_all_summary": {
+      "command": "go test ./...",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/chain\t(cached)",
+        "ok  \tl1chain/cmd/l1\t(cached)",
+        "ok  \tl1chain/consensus\t(cached)",
+        "ok  \tl1chain/core\t(cached)",
+        "ok  \tl1chain/evm\t2.210s",
+        "ok  \tl1chain/node\t(cached)",
+        "ok  \tl1chain/p2p\t(cached)",
+        "ok  \tl1chain/redteam\t(cached)",
+        "ok  \tl1chain/rpc\t(cached)",
+        "ok  \tl1chain/state\t(cached)",
+        "ok  \tl1chain/store\t(cached)",
+        "ok  \tl1chain/vm\t(cached)",
+        "ok  \tl1chain/wallet\t(cached)"
+      ]
+    }
+  }
+}

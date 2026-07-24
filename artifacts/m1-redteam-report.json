@@ -1,0 +1,111 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M1",
+  "title": "M1 red-team adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-07-24",
+  "lane": "executor-qa-red-team (6-M1RedTeam)",
+  "test_package": "l1chain/redteam",
+  "test_files": [
+    "redteam/doc.go",
+    "redteam/adversarial_test.go"
+  ],
+  "principle": "Each case asserts the chain REJECTS or correctly handles the attack. Tests use only exported l1chain APIs; no public API was modified and no existing test was weakened.",
+  "adversarial_cases": [
+    {
+      "id": "adv-01",
+      "test": "TestAdv01DoubleSpendWithinBlock",
+      "scenario": "Sender balance B=1000 submits two txs each spending 600 (>B/2), summing 1200 (>B) in ONE block.",
+      "expected_handling": "AddBlock and ApplyBlock reject with ErrInsufficientBalance; canonical head and all balances remain unchanged (atomic, no partial/negative/overflow balance).",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-02",
+      "test": "TestAdv02ReplayNonceReuse",
+      "scenario": "A validly secp256k1-signed tx (nonce 0) is applied via ApplyTx twice.",
+      "expected_handling": "Second application rejected with ErrBadNonce; balance debited exactly once; sender nonce advances to 1.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-03",
+      "test": "TestAdv03SignatureForgeryWrongSigner",
+      "scenario": "Tx signed by key X but From overwritten to address(Y).",
+      "expected_handling": "wallet.Verify returns false; AddBlock (verifySig=wallet.Verify) rejects with ErrBadSig; head does not advance.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-04",
+      "test": "TestAdv04InvalidPoW",
+      "scenario": "Well-formed block whose hash does not meet its declared Difficulty (Difficulty bumped to 240 without re-mining).",
+      "expected_handling": "AddBlock rejects with ErrBadPoW.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-05",
+      "test": "TestAdv05TamperedRoots",
+      "scenario": "Correct txs but wrong Header.StateRoot (re-mined), and separately wrong Header.MerkleRoot (re-mined).",
+      "expected_handling": "StateRoot tamper rejected with ErrBadStateRoot; MerkleRoot tamper rejected with ErrBadTxRoot.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-06",
+      "test": "TestAdv06DeepReorgNoStateLeakage",
+      "scenario": "Head branch A (2 blocks crediting addr(2)) vs heavier competing branch B (3 blocks crediting addr(3)).",
+      "expected_handling": "Canonical head switches to B (heavier cumulative difficulty); branch-A credit to addr(2) is 0 in State() (no cross-branch state leakage); addr(3)=375, addr(1)=625, miner=3*BlockReward; abandoned tip still retrievable by hash but non-canonical.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-07",
+      "test": "TestAdv07BalanceUnderflowOverflowGuards",
+      "scenario": "Transfer with Value(5000) > balance(1000) and Value = math.MaxUint64.",
+      "expected_handling": "Both rejected with ErrInsufficientBalance; sender balance stays 1000 (no underflow), recipient stays 0 (no overflow wraparound), sender nonce not advanced by rejected txs.",
+      "verdict": "passed"
+    },
+    {
+      "id": "adv-08",
+      "test": "TestAdv08CoinbaseTampering",
+      "scenario": "Block whose claimed StateRoot credits the miner an EXTRA BlockReward (2x total).",
+      "expected_handling": "Engine re-derives the correct single-reward state; claimed root mismatches, rejected with ErrBadStateRoot; head does not advance.",
+      "verdict": "passed"
+    }
+  ],
+  "summary": {
+    "total_cases": 8,
+    "passed": 8,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No adversarial case revealed a defect. The chain rejected every modeled attack with the expected sentinel error and preserved atomicity/state integrity."
+  },
+  "go_vet": {
+    "command": "go vet ./...",
+    "result": "pass"
+  },
+  "go_test_summary": {
+    "command": "go test ./...",
+    "result": "pass",
+    "raw": [
+      "ok  \tl1chain/chain\t(cached)",
+      "?   \tl1chain/cmd/l1\t[no test files]",
+      "ok  \tl1chain/consensus\t(cached)",
+      "ok  \tl1chain/core\t(cached)",
+      "ok  \tl1chain/node\t(cached)",
+      "ok  \tl1chain/redteam\t1.116s",
+      "ok  \tl1chain/rpc\t(cached)",
+      "ok  \tl1chain/state\t(cached)",
+      "ok  \tl1chain/store\t(cached)",
+      "?   \tl1chain/vm\t[no test files]",
+      "ok  \tl1chain/wallet\t(cached)"
+    ]
+  },
+  "redteam_verbose_raw": [
+    "--- PASS: TestAdv01DoubleSpendWithinBlock (0.00s)",
+    "--- PASS: TestAdv02ReplayNonceReuse (0.02s)",
+    "--- PASS: TestAdv03SignatureForgeryWrongSigner (0.00s)",
+    "--- PASS: TestAdv04InvalidPoW (0.00s)",
+    "--- PASS: TestAdv05TamperedRoots (0.00s)",
+    "--- PASS: TestAdv06DeepReorgNoStateLeakage (0.00s)",
+    "--- PASS: TestAdv07BalanceUnderflowOverflowGuards (0.00s)",
+    "--- PASS: TestAdv08CoinbaseTampering (0.00s)",
+    "ok  \tl1chain/redteam\t1.138s"
+  ]
+}

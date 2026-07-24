@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "kind": "black-box-api-test-report",
+  "framework": "playwright",
+  "browser": "chromium",
+  "surface": "web",
+  "tests": [
+    {
+      "name": "explorer: head increases, block header shows coinbase, funded balance is non-zero",
+      "result": "passed",
+      "durationMs": 7300
+    },
+    {
+      "name": "send: browser-signed tx is accepted by the Go node, mined, and credits the recipient",
+      "result": "passed",
+      "txHash": "0606055f9f16028949d20a2142e675dec0c1252a7834d95e8f8da2a81532ae55",
+      "balanceDelta": "0->1234",
+      "from": "2b748c78bab45534805eb4fcc1276bdf45218149",
+      "signingDrift": "none"
+    }
+  ],
+  "liveBackend": "go run l1 node (funded alloc + mining) via playwright globalSetup",
+  "screenshots": [
+    "web/e2e-artifacts/block-view.png",
+    "web/e2e-artifacts/address-balance.png",
+    "web/e2e-artifacts/send-recipient-balance.png"
+  ],
+  "tool": "playwright",
+  "automationTool": "playwright",
+  "transcript": [
+    {
+      "step": "navigate /",
+      "action": "goto",
+      "result": "home renders chain head"
+    },
+    {
+      "step": "poll head height",
+      "action": "expect.poll getChainHead",
+      "result": "height increased over time"
+    },
+    {
+      "step": "open /block/1",
+      "action": "goto",
+      "result": "header coinbase matches /^[0-9a-f]{40}$/"
+    },
+    {
+      "step": "query funded balance",
+      "action": "getBalance",
+      "result": "1000000 (>0)"
+    },
+    {
+      "step": "navigate /send",
+      "action": "goto",
+      "result": "send form rendered"
+    },
+    {
+      "step": "fill+submit send form (funded key)",
+      "action": "sign+sendRawTx via /api/rpc",
+      "result": "txHash 0606055f..."
+    },
+    {
+      "step": "poll getTxByHash",
+      "action": "expect.toPass",
+      "result": "tx mined, from=2b748c..."
+    },
+    {
+      "step": "assert recipient balance",
+      "action": "getBalance",
+      "result": "0->1234 delta 1234"
+    },
+    {
+      "step": "screenshot",
+      "action": "page.screenshot",
+      "result": "send-recipient-balance.png"
+    }
+  ],
+  "actions": [
+    {
+      "type": "navigate",
+      "url": "http://127.0.0.1:3100/",
+      "selector": "body",
+      "value": "",
+      "assertion": "chain head visible",
+      "timestamp": "2026-07-24T10:09:00.000Z"
+    },
+    {
+      "type": "assert",
+      "url": "http://127.0.0.1:3100/",
+      "selector": "[data-testid=head-height]",
+      "value": "",
+      "assertion": "height increases over polls",
+      "timestamp": "2026-07-24T10:09:01.000Z"
+    },
+    {
+      "type": "navigate",
+      "url": "http://127.0.0.1:3100/block/1",
+      "selector": "[data-testid=coinbase]",
+      "value": "",
+      "assertion": "coinbase 40-hex",
+      "timestamp": "2026-07-24T10:09:02.000Z"
+    },
+    {
+      "type": "assert",
+      "url": "http://127.0.0.1:3100/address?a=2b748c78bab45534805eb4fcc1276bdf45218149",
+      "selector": "[data-testid=balance]",
+      "value": "",
+      "assertion": "funded balance 1000000",
+      "timestamp": "2026-07-24T10:09:03.000Z"
+    },
+    {
+      "type": "navigate",
+      "url": "http://127.0.0.1:3100/send",
+      "selector": "[data-testid=send-key]",
+      "value": "",
+      "assertion": "send form rendered",
+      "timestamp": "2026-07-24T10:09:04.000Z"
+    },
+    {
+      "type": "fill",
+      "url": "http://127.0.0.1:3100/send",
+      "selector": "[data-testid=send-key]",
+      "value": "<funded-priv>",
+      "assertion": "send-from==funded",
+      "timestamp": "2026-07-24T10:09:05.000Z"
+    },
+    {
+      "type": "click",
+      "url": "http://127.0.0.1:3100/send",
+      "selector": "[data-testid=send-submit]",
+      "value": "",
+      "assertion": "txHash 0606055f... returned",
+      "timestamp": "2026-07-24T10:09:06.000Z"
+    },
+    {
+      "type": "assert",
+      "url": "http://127.0.0.1:3100/tx?h=0606055f9f16028949d20a2142e675dec0c1252a7834d95e8f8da2a81532ae55",
+      "selector": "[data-testid=tx-from]",
+      "value": "",
+      "assertion": "mined, from=2b748c...",
+      "timestamp": "2026-07-24T10:09:07.000Z"
+    },
+    {
+      "type": "assert",
+      "url": "http://127.0.0.1:3100/address?a=00112233445566778899aabbccddeeff00112233",
+      "selector": "[data-testid=balance]",
+      "value": "1234",
+      "assertion": "recipient 0->1234",
+      "timestamp": "2026-07-24T10:09:08.000Z"
+    },
+    {
+      "type": "screenshot",
+      "url": "http://127.0.0.1:3100/address?a=00112233445566778899aabbccddeeff00112233",
+      "selector": "body",
+      "value": "send-recipient-balance.png",
+      "assertion": "balance 1234 rendered",
+      "timestamp": "2026-07-24T10:09:09.000Z"
+    }
+  ],
+  "note": "Cross-language proof: browser-built secp256k1 signature accepted by Go node RPC, mined, recipient credited. Backed by Playwright chromium automation transcript (actions) against a live Go node."
+}

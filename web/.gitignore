@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+test-results/
+playwright-report/
+e2e-artifacts/
+next-env.d.ts
+*.log
+.env*.local
+.l1node/
