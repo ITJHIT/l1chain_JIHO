@@ -30,7 +30,12 @@ export async function POST(req: NextRequest) {
   try {
     const upstream = await fetch(RPC_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // Bypass ngrok's free-tier browser-warning interstitial so tunneled
+        // nodes return JSON, not HTML. Harmless for non-ngrok endpoints.
+        "ngrok-skip-browser-warning": "true",
+      },
       body: JSON.stringify(body),
       cache: "no-store",
     });
