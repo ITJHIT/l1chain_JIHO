@@ -2,6 +2,5 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "buildCommand": "next build",
-  "installCommand": "npm install",
-  "comment": "Deploy with Vercel 'Root Directory' set to web/. Set env NEXT_PUBLIC_RPC_URL (or RPC_URL for the /api/rpc proxy) to your public node's JSON-RPC URL."
+  "installCommand": "npm install"
 }
