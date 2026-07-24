@@ -8,3 +8,4 @@ next-env.d.ts
 *.log
 .env*.local
 .l1node/
+tsconfig.tsbuildinfo
