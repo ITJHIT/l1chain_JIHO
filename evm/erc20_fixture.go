@@ -11,10 +11,12 @@ import (
 // used as a fixed fixture for M4.
 //
 // SOURCE / COMPILER NOTE:
-// solc is intentionally NOT installed in this environment (see M4 constraints),
-// so — instead of compiling Solidity at test time — this is a byte-exact,
-// hand-assembled EVM creation-bytecode fixture that faithfully implements the
-// STANDARD ERC-20 storage layout and ABI that the Solidity compiler emits:
+// solc is intentionally NOT installed in this build environment (see M4
+// constraints), so — instead of compiling Solidity at test time — this is a
+// hand-assembled EVM creation-bytecode fixture that reproduces Solidity's
+// STANDARD ERC-20 storage layout and ABI semantics. It is NOT claimed to be
+// byte-for-byte identical to any specific solc release's output; it is a
+// faithful re-implementation of the same observable layout/selectors:
 //
 //   contract Token {                       // OpenZeppelin-style semantics
 //       mapping(address => uint256) balances;   // storage slot 0
@@ -35,6 +37,10 @@ import (
 // to end against github.com/ethereum/go-ethereum/core/vm v1.17.4 (deploy +
 // balanceOf + transfer + revert-on-overspend + deterministic state root) before
 // being frozen here.
+//
+// Running arbitrary solc-emitted bytecode (PUSH0 sequencing, memory-safety
+// guards, strict calldata-length guards, LOG/event emission, precompiles) is an
+// explicit LONG-TERM goal and is deliberately deferred beyond M4.
 const ERC20CreationHex = "7f00000000000000000000000000000000000000000000d3c21bcecceda1000000806001553360005260006020526040600020556100996100436000396100996000f360003560e01c806370a082311461002c578063a9059cbb1461005257806318160ddd146100465760006000fd5b600435600052600060205260406000205460005260206000f35b60015460005260206000f35b336000526000602052604060002080546024358082106100935790039055600435600052600060205260406000208054602435019055600160005260206000f35b60006000fd"
 
 // ERC20InitialSupply is the amount minted to the deployer by the constructor:

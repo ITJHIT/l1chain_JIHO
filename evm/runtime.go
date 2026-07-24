@@ -28,9 +28,12 @@ import (
 //   - evm.Call(caller, addr, input, vm.NewGasBudget(gas,0), value)
 //
 // This build of go-ethereum carries the EIP-8037 split-gas model, so gas is a
-// vm.GasBudget{regular,state}. We fund the whole budget as regular gas; state
-// charges spill into regular gas per GasBudget.CanAfford, which is sufficient
-// for M4's execution-capability demonstration.
+// vm.GasBudget{regular,state}. We deliberately collapse both lanes here by
+// funding the whole budget as regular gas via vm.NewGasBudget(gas, 0); state
+// charges spill into regular gas per GasBudget.CanAfford. The scalar gasUsed
+// returned by Deploy/Call is therefore capability-grade (proves execution and
+// relative cost) — NOT consensus-grade metering. Honouring the split-gas lanes
+// for block-hash-exact accounting is a long-term goal, not required for M4.
 type Harness struct {
 	State       *state.StateDB
 	ChainConfig *params.ChainConfig

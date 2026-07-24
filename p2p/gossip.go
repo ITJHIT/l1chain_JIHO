@@ -9,9 +9,11 @@ import (
 	"log"
 
 	"l1chain/chain"
+	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/node"
 	"l1chain/store"
+	"l1chain/wallet"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -56,6 +58,16 @@ func NewP2P(ctx context.Context, h host.Host) (*P2P, error) {
 	if err != nil {
 		return nil, fmt.Errorf("p2p: new gossipsub: %w", err)
 	}
+	// Register cheap, side-effect-free topic validators BEFORE joining/subscribing
+	// so GossipSub drops structurally/consensus-invalid messages during validation
+	// and never relays them onward (stops network-wide amplification). Application
+	// state is still re-validated later via node.AcceptExternalBlock / SubmitTx.
+	if err := ps.RegisterTopicValidator(BlockTopic, blockTopicValidator); err != nil {
+		return nil, fmt.Errorf("p2p: register %s validator: %w", BlockTopic, err)
+	}
+	if err := ps.RegisterTopicValidator(TxTopic, txTopicValidator); err != nil {
+		return nil, fmt.Errorf("p2p: register %s validator: %w", TxTopic, err)
+	}
 	bt, err := ps.Join(BlockTopic)
 	if err != nil {
 		return nil, fmt.Errorf("p2p: join %s: %w", BlockTopic, err)
@@ -65,6 +77,43 @@ func NewP2P(ctx context.Context, h host.Host) (*P2P, error) {
 		return nil, fmt.Errorf("p2p: join %s: %w", TxTopic, err)
 	}
 	return &P2P{host: h, ps: ps, block: bt, tx: tt, syncSem: make(chan struct{}, maxConcurrentSyncs)}, nil
+}
+
+// blockTopicValidator is the GossipSub ValidatorEx for the block topic. It is a
+// cheap, side-effect-free pre-propagation filter that runs during message
+// validation, before the message is relayed to the rest of the mesh: an
+// undecodable block, one whose hash does not meet its declared PoW target, or
+// one whose transaction merkle root does not match its header is REJECTED so it
+// is never forwarded (stopping network-wide amplification of junk/invalid
+// blocks). It intentionally performs NO state execution; full application-time
+// validation still happens in node.AcceptExternalBlock.
+func blockTopicValidator(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+	b, err := store.DecodeBlock(msg.Data)
+	if err != nil {
+		return pubsub.ValidationReject
+	}
+	if !consensus.MeetsTarget(b.Hash(), b.Header.Difficulty) {
+		return pubsub.ValidationReject
+	}
+	if b.TxRoot() != b.Header.MerkleRoot {
+		return pubsub.ValidationReject
+	}
+	return pubsub.ValidationAccept
+}
+
+// txTopicValidator is the GossipSub ValidatorEx for the tx topic. It rejects an
+// undecodable transaction or one whose signature fails wallet.Verify before the
+// message is relayed. It is cheap and side-effect-free (no mempool admission,
+// no state); node.SubmitTx still fully re-validates on the read loop.
+func txTopicValidator(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+	tx, err := decodeTx(msg.Data)
+	if err != nil {
+		return pubsub.ValidationReject
+	}
+	if !wallet.Verify(tx) {
+		return pubsub.ValidationReject
+	}
+	return pubsub.ValidationAccept
 }
 
 // Host returns the underlying libp2p host.

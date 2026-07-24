@@ -37,6 +37,11 @@ var (
 	// ErrNoStore is returned when a persistence operation is requested but the
 	// node was configured in-memory (no DBPath).
 	ErrNoStore = errors.New("node: no store configured")
+	// ErrMempoolFull is returned by SubmitTx when the mempool already holds the
+	// configured maximum number of pending transactions. The policy is a
+	// deterministic reject-when-full: the NEW tx is rejected and existing pooled
+	// txs are left untouched so per-sender nonce sequencing is never broken.
+	ErrMempoolFull = errors.New("node: mempool full")
 )
 
 // Config parameterizes a Node.
@@ -58,8 +63,17 @@ type Config struct {
 	// independently constructed nodes (e.g. a multi-node network) produce an
 	// identical genesis block/hash. When zero the current time is used.
 	GenesisTimestamp int64
+	// MaxMempool caps the number of pending transactions held in the mempool.
+	// Values <= 0 resolve to DefaultMaxMempool. SubmitTx rejects new txs with
+	// ErrMempoolFull once the cap is reached (existing pooled txs are kept).
+	MaxMempool int
 
 }
+
+// DefaultMaxMempool is the mempool size cap used when Config.MaxMempool <= 0.
+// It bounds memory growth / mempool-flood DoS while leaving ample headroom for
+// normal pending-tx batches.
+const DefaultMaxMempool = 4096
 
 // Node is a single full node: chain + optional store + mempool + miner.
 type Node struct {
@@ -72,6 +86,7 @@ type Node struct {
 	chain      *chain.Chain
 	store      *store.Store
 	mempool    []core.Transaction
+	maxMempool int
 	miner      wallet.Key
 	Difficulty uint32
 
@@ -82,10 +97,15 @@ type Node struct {
 // chain is loaded from it; otherwise a funded genesis is built (matching
 // chain/genesis.go) and, when persistent, saved together with its allocation.
 func New(cfg Config) (*Node, error) {
+	maxMempool := cfg.MaxMempool
+	if maxMempool <= 0 {
+		maxMempool = DefaultMaxMempool
+	}
 	n := &Node{
 		miner:      cfg.MinerKey,
 		Difficulty: cfg.Difficulty,
 		alloc:      cfg.GenesisAlloc,
+		maxMempool: maxMempool,
 	}
 
 	if cfg.DBPath != "" {
@@ -175,6 +195,14 @@ func (n *Node) MempoolLen() int {
 	return len(n.mempool)
 }
 
+// MempoolCap returns the resolved maximum number of pending transactions the
+// mempool will hold. SubmitTx rejects new txs with ErrMempoolFull at this size.
+func (n *Node) MempoolCap() int {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.maxMempool
+}
+
 // projectSender returns the effective next nonce and spendable balance for addr,
 // starting from head state and folding in already-pooled transactions from addr.
 // This lets a sender queue several sequential transactions before mining.
@@ -197,7 +225,9 @@ func (n *Node) projectSender(addr core.Address) (nonce, balance uint64) {
 
 // SubmitTx validates tx and, if acceptable, appends it to the mempool. It
 // rejects unsigned/forged txs, wrong nonces, and unaffordable transfers,
-// projecting already-pooled txs from the same sender.
+// projecting already-pooled txs from the same sender. Once the mempool holds
+// MempoolCap() txs it rejects further txs with ErrMempoolFull rather than
+// evicting pooled txs, which would break per-sender nonce sequencing.
 func (n *Node) SubmitTx(tx core.Transaction) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -210,6 +240,9 @@ func (n *Node) SubmitTx(tx core.Transaction) error {
 	}
 	if tx.From != tx.To && spendable < tx.Value {
 		return ErrInsufficientBalance
+	}
+	if len(n.mempool) >= n.maxMempool {
+		return ErrMempoolFull
 	}
 	n.mempool = append(n.mempool, tx)
 	return nil

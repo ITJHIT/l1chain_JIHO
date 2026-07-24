@@ -2,6 +2,7 @@ package evm
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -115,10 +116,17 @@ func TestTransferMoreThanBalanceReverts(t *testing.T) {
 	tooMuch := new(big.Int).Add(ERC20InitialSupply, big.NewInt(1))
 	ret, _, err := h.Call(deployer, token, EncodeTransfer(recipient, tooMuch), callGas)
 
-	// EVM revert semantics: either an error is returned, or (for a spec that
-	// returns false) the boolean return is zero. Our fixture reverts.
-	if err == nil && DecodeUint256(ret).Sign() != 0 {
-		t.Fatal("over-balance transfer unexpectedly succeeded")
+	// EVM revert semantics: the fixture takes the documented REVERT path on an
+	// over-balance transfer, so Call must surface a non-nil error. Pin that
+	// explicitly rather than accepting a mere false return.
+	if err == nil {
+		t.Fatalf("over-balance transfer did not revert: err is nil (ret=%x)", ret)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "revert") {
+		t.Fatalf("over-balance transfer failed without reverting: %v", err)
+	}
+	if DecodeUint256(ret).Sign() != 0 {
+		t.Fatal("over-balance transfer unexpectedly returned a non-zero (success) value")
 	}
 
 	// Balances must be unchanged.
