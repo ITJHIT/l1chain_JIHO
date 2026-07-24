@@ -29,11 +29,11 @@ func newContractChain() (*Chain, core.Block, map[core.Address]uint64) {
 }
 
 func deployTx(nonce uint64) core.Transaction {
-	return core.Transaction{From: addr(1), To: core.Address{}, Nonce: nonce, GasLimit: 100000, Data: counterCode, Signature: []byte{1}}
+	return core.Transaction{From: addr(1), To: core.Address{}, Nonce: nonce, GasLimit: 100000, ChainID: DefaultChainID, Data: counterCode, Signature: []byte{1}}
 }
 
 func callTx(to core.Address, nonce, gas uint64) core.Transaction {
-	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, Signature: []byte{1}}
+	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, ChainID: DefaultChainID, Signature: []byte{1}}
 }
 
 // TestContractDeployCallAndOOG exercises the full VM-through-chain path: deploy a

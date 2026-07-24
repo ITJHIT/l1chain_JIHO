@@ -9,8 +9,11 @@ import type { TxJSON } from "./types";
 //   address = last 20 bytes of digest
 //
 // Transaction SigningHash (core/transaction.go preimage(withSig=false)):
-//   From(20) || To(20) || Value(u64 BE) || Nonce(u64 BE) || GasLimit(u64 BE) || Data
-//   then SHA-256 of that preimage.
+//   From(20) || To(20) || Value(u64 BE) || Nonce(u64 BE) || GasLimit(u64 BE) ||
+//   ChainID(u64 BE) || Data
+//   then SHA-256 of that preimage. ChainID sits at a FIXED position right after
+//   GasLimit and before Data, byte-for-byte matching core/transaction.go, so the
+//   signature commits to the chain id (replay protection across chains).
 //
 // Signature (wallet/wallet.go Key.Sign -> dcrd ecdsa.SignCompact(priv, hash, true)):
 //   65 bytes: [recovery byte][R(32)][S(32)]
@@ -53,11 +56,19 @@ export function addressFromPrivHex(privHex: string): string {
   return bytesToHex(digest.slice(digest.length - 20)); // last 20 bytes
 }
 
+/**
+ * CHAIN_ID is the replay-protection domain. It MUST match go-l1-chain's
+ * chain.DefaultChainID (1337) and node Config.ChainID, or the node rejects the
+ * signed tx with ErrBadChainID even though the signature is valid.
+ */
+export const CHAIN_ID = 1337n;
+
 export interface UnsignedTx {
   to: string; // 20-byte hex (no 0x)
   value: bigint;
   nonce: bigint;
   gasLimit: bigint;
+  chainId?: bigint; // defaults to CHAIN_ID when omitted
   data?: Uint8Array;
 }
 
@@ -66,7 +77,15 @@ function signingPreimage(from: Uint8Array, tx: UnsignedTx): Uint8Array {
   if (from.length !== 20) throw new Error("from must be 20 bytes");
   if (to.length !== 20) throw new Error("to must be 20 bytes");
   const data = tx.data ?? new Uint8Array(0);
-  const parts = [from, to, u64be(tx.value), u64be(tx.nonce), u64be(tx.gasLimit), data];
+  const parts = [
+    from,
+    to,
+    u64be(tx.value),
+    u64be(tx.nonce),
+    u64be(tx.gasLimit),
+    u64be(tx.chainId ?? CHAIN_ID),
+    data,
+  ];
   const total = parts.reduce((a, p) => a + p.length, 0);
   const buf = new Uint8Array(total);
   let off = 0;
@@ -97,9 +116,12 @@ export async function signTx(privHex: string, tx: UnsignedTx): Promise<TxJSON> {
   return {
     from: fromHex,
     to: tx.to,
-    value: Number(tx.value),
-    nonce: Number(tx.nonce),
-    gasLimit: Number(tx.gasLimit),
+    // Large integer fields go on the wire as DECIMAL STRINGS (matching the Go
+    // server's `,string` JSON tags) so nothing is truncated at 2^53.
+    value: tx.value.toString(),
+    nonce: tx.nonce.toString(),
+    gasLimit: tx.gasLimit.toString(),
+    chainId: (tx.chainId ?? CHAIN_ID).toString(),
     data: bytesToHex(data),
     signature: bytesToHex(sig65),
     hash: "", // recomputed server-side; TxFromJSON ignores it

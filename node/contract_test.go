@@ -21,7 +21,7 @@ func slotHash(u uint64) core.Hash {
 }
 
 func signedContractTx(k wallet.Key, to core.Address, isCreate bool, nonce, gas uint64, data []byte) core.Transaction {
-	tx := core.Transaction{Nonce: nonce, GasLimit: gas, Data: data}
+	tx := core.Transaction{Nonce: nonce, GasLimit: gas, ChainID: chain.DefaultChainID, Data: data}
 	if !isCreate {
 		tx.To = to
 	}

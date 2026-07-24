@@ -46,11 +46,12 @@ async function rpcCall<T>(
   return data.result === undefined ? null : data.result;
 }
 
-// getChainHead() -> {height, hash}
+// getChainHead() -> {height, hash}. The wire encodes height as a decimal string
+// (Go `,string` tag); parse it to a number for the UI (chain height is small).
 export async function getChainHead(base?: string): Promise<ChainHead> {
-  const r = await rpcCall<ChainHead>("getChainHead", [], base);
+  const r = await rpcCall<{ height: string; hash: string }>("getChainHead", [], base);
   if (!r) throw new Error("getChainHead returned null");
-  return r;
+  return { height: Number(r.height), hash: r.hash };
 }
 
 // getBlockByHeight(height u64) -> <block> | null
@@ -61,9 +62,10 @@ export async function getBlockByHeight(
   return rpcCall<BlockJSON>("getBlockByHeight", [height], base);
 }
 
-// getBalance(addrHex) -> {balance}
-export async function getBalance(addrHex: string, base?: string): Promise<number> {
-  const r = await rpcCall<{ balance: number }>("getBalance", [addrHex], base);
+// getBalance(addrHex) -> {balance}. Returned as a DECIMAL STRING for
+// full-precision display (balances can exceed 2^53).
+export async function getBalance(addrHex: string, base?: string): Promise<string> {
+  const r = await rpcCall<{ balance: string }>("getBalance", [addrHex], base);
   if (!r) throw new Error("getBalance returned null");
   return r.balance;
 }

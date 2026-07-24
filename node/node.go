@@ -42,6 +42,12 @@ var (
 	// deterministic reject-when-full: the NEW tx is rejected and existing pooled
 	// txs are left untouched so per-sender nonce sequencing is never broken.
 	ErrMempoolFull = errors.New("node: mempool full")
+	// ErrBadChainID is returned by SubmitTx when a tx's ChainID does not match
+	// the node's configured chain id. It is the mempool-admission mirror of the
+	// authoritative consensus rule chain.ErrBadChainID (enforced in AddBlock /
+	// CandidateStateRoot); rejecting here keeps replayed foreign-chain txs out of
+	// the mempool so they can never poison mining.
+	ErrBadChainID = errors.New("node: transaction chain id mismatch")
 )
 
 // Config parameterizes a Node.
@@ -67,13 +73,21 @@ type Config struct {
 	// Values <= 0 resolve to DefaultMaxMempool. SubmitTx rejects new txs with
 	// ErrMempoolFull once the cap is reached (existing pooled txs are kept).
 	MaxMempool int
-
+	// ChainID is the replay-protection domain. Values <= 0 (i.e. 0) resolve to
+	// DefaultChainID. It is threaded into the chain so genesis and every flow
+	// agree, and SubmitTx rejects txs carrying a different ChainID with
+	// ErrBadChainID.
+	ChainID uint64
 }
 
 // DefaultMaxMempool is the mempool size cap used when Config.MaxMempool <= 0.
 // It bounds memory growth / mempool-flood DoS while leaving ample headroom for
 // normal pending-tx batches.
 const DefaultMaxMempool = 4096
+
+// DefaultChainID is the replay-protection domain used when Config.ChainID == 0.
+// It re-exports chain.DefaultChainID so node callers need not import chain.
+const DefaultChainID = chain.DefaultChainID
 
 // Node is a single full node: chain + optional store + mempool + miner.
 type Node struct {
@@ -89,6 +103,7 @@ type Node struct {
 	maxMempool int
 	miner      wallet.Key
 	Difficulty uint32
+	chainID    uint64
 
 	alloc map[core.Address]uint64
 }
@@ -101,9 +116,14 @@ func New(cfg Config) (*Node, error) {
 	if maxMempool <= 0 {
 		maxMempool = DefaultMaxMempool
 	}
+	chainID := cfg.ChainID
+	if chainID == 0 {
+		chainID = DefaultChainID
+	}
 	n := &Node{
 		miner:      cfg.MinerKey,
 		Difficulty: cfg.Difficulty,
+		chainID:    chainID,
 		alloc:      cfg.GenesisAlloc,
 		maxMempool: maxMempool,
 	}
@@ -122,6 +142,7 @@ func New(cfg Config) (*Node, error) {
 		}
 		if ok {
 			n.chain = c
+			n.chain.SetChainID(chainID)
 			// Recover the genesis alloc so re-saves stay faithful.
 			if alloc, have, err := s.GetGenesisAlloc(); err == nil && have {
 				n.alloc = alloc
@@ -142,6 +163,7 @@ func New(cfg Config) (*Node, error) {
 	}
 	genesis := g.ToBlock()
 	n.chain = chain.NewChain(genesis, cfg.GenesisAlloc)
+	n.chain.SetChainID(chainID)
 
 	if n.store != nil {
 		if err := n.store.PutGenesisAlloc(cfg.GenesisAlloc); err != nil {
@@ -233,6 +255,9 @@ func (n *Node) SubmitTx(tx core.Transaction) error {
 	defer n.mu.Unlock()
 	if !wallet.Verify(tx) {
 		return ErrBadSignature
+	}
+	if tx.ChainID != n.chainID {
+		return ErrBadChainID
 	}
 	nextNonce, spendable := n.projectSender(tx.From)
 	if tx.Nonce != nextNonce {

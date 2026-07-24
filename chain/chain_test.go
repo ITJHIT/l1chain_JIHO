@@ -64,7 +64,7 @@ func headHash(c *Chain) core.Hash {
 }
 
 func tx(from, to core.Address, value, nonce uint64) core.Transaction {
-	return core.Transaction{From: from, To: to, Value: value, Nonce: nonce, Signature: []byte{1}}
+	return core.Transaction{From: from, To: to, Value: value, Nonce: nonce, ChainID: DefaultChainID, Signature: []byte{1}}
 }
 
 const testDiff = 6

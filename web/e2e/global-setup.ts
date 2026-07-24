@@ -23,8 +23,10 @@ async function rpcHead(): Promise<{ height: number; hash: string } | null> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getChainHead", params: [] }),
     });
-    const data = (await res.json()) as { result?: { height: number; hash: string } };
-    return data.result ?? null;
+    // height is a decimal string on the wire (Go `,string` tag); parse to number.
+    const data = (await res.json()) as { result?: { height: string; hash: string } };
+    if (!data.result) return null;
+    return { height: Number(data.result.height), hash: data.result.hash };
   } catch {
     return null;
   }

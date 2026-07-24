@@ -117,7 +117,7 @@ func buildChain(t *testing.T, sender, recipient wallet.Key, nBlocks int) (*chain
 	for i := 0; i < nBlocks; i++ {
 		var txs []core.Transaction
 		if i == 0 {
-			tx := core.Transaction{From: sender.Address(), To: recipient.Address(), Value: 250, Nonce: 0}
+			tx := core.Transaction{From: sender.Address(), To: recipient.Address(), Value: 250, Nonce: 0, ChainID: chain.DefaultChainID}
 			sender.Sign(&tx)
 			txs = []core.Transaction{tx}
 		}

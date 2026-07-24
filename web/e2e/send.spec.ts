@@ -40,9 +40,9 @@ async function rpc<T>(
 }
 
 async function getBalance(request: APIRequestContext, addr: string): Promise<number> {
-  const r = await rpc<{ balance: number }>(request, "getBalance", [addr]);
+  const r = await rpc<{ balance: string }>(request, "getBalance", [addr]);
   if (!r) throw new Error(`getBalance(${addr}) returned null`);
-  return r.balance;
+  return Number(r.balance);
 }
 
 test("send: browser-signed tx is accepted by the Go node, mined, and credits the recipient", async ({
@@ -99,7 +99,8 @@ test("send: browser-signed tx is accepted by the Go node, mined, and credits the
   // The mined tx must originate from the funded address (from == funded).
   expect(minedTx.from).toBe(FUNDED_ADDR);
   expect(minedTx.to).toBe(RECIPIENT_ADDR);
-  expect(minedTx.value).toBe(SEND_VALUE);
+  // value is a decimal string on the wire (Go `,string` tag): parse before compare.
+  expect(Number(minedTx.value)).toBe(SEND_VALUE);
 
   // --- Recipient balance increased by exactly the sent value -----------------
   await expect

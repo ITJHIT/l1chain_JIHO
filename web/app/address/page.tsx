@@ -5,7 +5,7 @@ import { getBalance } from "@/lib/rpc";
 
 export default function AddressView() {
   const [addr, setAddr] = useState("");
-  const [balance, setBalance] = useState<number | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 

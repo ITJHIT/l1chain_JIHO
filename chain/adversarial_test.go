@@ -37,7 +37,7 @@ func callSeq(to core.Address, after ...byte) []byte {
 }
 
 func rawTx(to core.Address, nonce, gas uint64, data []byte) core.Transaction {
-	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, Data: data, Signature: []byte{1}}
+	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, ChainID: DefaultChainID, Data: data, Signature: []byte{1}}
 }
 
 // TestAdvChain05OOGCallAdvancesNonceConsumesGasRevertsStorage proves node-level

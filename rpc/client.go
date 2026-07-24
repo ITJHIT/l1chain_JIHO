@@ -66,7 +66,7 @@ func (c *Client) call(method string, out any, params ...any) error {
 
 // ChainHead is the getChainHead result.
 type ChainHead struct {
-	Height uint64 `json:"height"`
+	Height uint64 `json:"height,string"`
 	Hash   string `json:"hash"`
 }
 
@@ -80,7 +80,7 @@ func (c *Client) GetChainHead() (ChainHead, error) {
 // GetBalance returns the balance of the address (hex).
 func (c *Client) GetBalance(addrHex string) (uint64, error) {
 	var out struct {
-		Balance uint64 `json:"balance"`
+		Balance uint64 `json:"balance,string"`
 	}
 	if err := c.call("getBalance", &out, addrHex); err != nil {
 		return 0, err

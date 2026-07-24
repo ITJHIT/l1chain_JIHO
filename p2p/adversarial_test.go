@@ -82,6 +82,7 @@ func makeForgedTx(t *testing.T) core.Transaction {
 	tx.To = victim.Address()
 	tx.Value = 1
 	tx.Nonce = 0
+	tx.ChainID = chain.DefaultChainID
 	signer.Sign(&tx)          // From=signer, signature over SigningHash(From=signer)
 	tx.From = victim.Address() // forge: claim to be the victim
 	return tx
@@ -230,6 +231,7 @@ func TestAdvP2P02ForgedSignatureTxGossiped(t *testing.T) {
 	vtx.To = recipient.Address()
 	vtx.Value = 100
 	vtx.Nonce = honest.Nonce(fa)
+	vtx.ChainID = chain.DefaultChainID
 	faucet.Sign(&vtx)
 	vtxBytes, err := encodeTx(vtx)
 	if err != nil {

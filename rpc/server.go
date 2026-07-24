@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"l1chain/core"
 	"l1chain/node"
@@ -64,28 +65,33 @@ type RPCError struct {
 
 func (e *RPCError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
 
-// TxJSON is the hex-encoded wire representation of a core.Transaction.
+// TxJSON is the wire representation of a core.Transaction. Addresses, hashes,
+// Data and Signature are hex strings; the large integer fields (Value, Nonce,
+// GasLimit, ChainID) are encoded as DECIMAL STRINGS via the encoding/json
+// ",string" option so a JS client never loses precision above 2^53.
 type TxJSON struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
-	Value     uint64 `json:"value"`
-	Nonce     uint64 `json:"nonce"`
-	GasLimit  uint64 `json:"gasLimit"`
+	Value     uint64 `json:"value,string"`
+	Nonce     uint64 `json:"nonce,string"`
+	GasLimit  uint64 `json:"gasLimit,string"`
+	ChainID   uint64 `json:"chainId,string"`
 	Data      string `json:"data"`
 	Signature string `json:"signature"`
 	Hash      string `json:"hash"`
 }
 
-// HeaderJSON is the hex-encoded wire representation of a core.Header.
+// HeaderJSON is the wire representation of a core.Header. Hashes/addresses are
+// hex; the u64 fields that can grow large (Height, Nonce) are decimal strings.
 type HeaderJSON struct {
-	Height     uint64 `json:"height"`
+	Height     uint64 `json:"height,string"`
 	PrevHash   string `json:"prevHash"`
 	MerkleRoot string `json:"merkleRoot"`
 	StateRoot  string `json:"stateRoot"`
 	Coinbase   string `json:"coinbase"`
 	Timestamp  int64  `json:"timestamp"`
 	Difficulty uint32 `json:"difficulty"`
-	Nonce      uint64 `json:"nonce"`
+	Nonce      uint64 `json:"nonce,string"`
 }
 
 // BlockJSON is the hex-encoded wire representation of a core.Block.
@@ -106,6 +112,7 @@ func TxToJSON(tx core.Transaction) TxJSON {
 		Value:     tx.Value,
 		Nonce:     tx.Nonce,
 		GasLimit:  tx.GasLimit,
+		ChainID:   tx.ChainID,
 		Data:      hex.EncodeToString(tx.Data),
 		Signature: hex.EncodeToString(tx.Signature),
 		Hash:      h.Hex(),
@@ -137,6 +144,7 @@ func TxFromJSON(j TxJSON) (core.Transaction, error) {
 		Value:     j.Value,
 		Nonce:     j.Nonce,
 		GasLimit:  j.GasLimit,
+		ChainID:   j.ChainID,
 		Data:      data,
 		Signature: sig,
 	}, nil
@@ -287,7 +295,7 @@ func (s *server) dispatch(req Request) (any, *RPCError) {
 	case "getChainHead":
 		head := s.node.Head()
 		return map[string]any{
-			"height": head.Header.Height,
+			"height": strconv.FormatUint(head.Header.Height, 10),
 			"hash":   head.Hash().Hex(),
 		}, nil
 
@@ -311,7 +319,7 @@ func (s *server) dispatch(req Request) (any, *RPCError) {
 		if err != nil {
 			return nil, &RPCError{codeInvalidParams, err.Error()}
 		}
-		return map[string]any{"balance": s.node.Balance(addr)}, nil
+		return map[string]any{"balance": strconv.FormatUint(s.node.Balance(addr), 10)}, nil
 
 	case "sendRawTx":
 		var txj TxJSON

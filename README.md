@@ -108,14 +108,20 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - **StateDB is an interface** (`state/StateDB`) so the M1 KV model can be swapped for a Merkle-Patricia-Trie without touching block validation, RPC, or the VM — the seam M4's EVM state uses.
 - **The EVM (M4) is an execution capability**, cleanly isolated from chain consensus (nothing imports `l1chain/evm`). Full opcode/precompile/MPT byte-for-byte chain-consensus equivalence is a documented long-term goal.
 
-## Roadmap (deferred hardening)
+## Hardening (post-M4)
 
-- Real-internet P2P: mDNS/DHT peer discovery + AutoNAT/relay NAT traversal (currently loopback/LAN).
-- Gossip `RegisterTopicValidator` to reject invalid messages before network propagation.
-- Transaction chain-id / replay-domain separation.
-- Mempool size cap.
-- String-encoded u256 amounts on the JSON wire (avoid JS number precision at large denominations).
-- EVM: run solc-compiled OpenZeppelin contracts, event logs, precompiles; promote canonical StateDB to MPT/keccak.
+Implemented on top of the milestones:
+
+- **Gossip topic validators** — invalid-PoW / bad-merkle blocks and forged-signature txs are rejected before network propagation (anti-amplification), on top of application-time re-validation.
+- **mDNS LAN discovery** (`--mdns`) — nodes on the same network auto-discover and connect without explicit `--peers`.
+- **Transaction chain-id** — a `ChainID` is folded into the signing preimage, so a tx signed for one chain cannot be replayed on another; enforced identically on the mining and validation paths (`ErrBadChainID`).
+- **Bounded mempool** — configurable size cap with a reject-when-full policy (`ErrMempoolFull`).
+- **String-encoded amounts on the wire** — large `uint256`/`uint64` fields are decimal strings in JSON-RPC (and the browser signer), avoiding JS `Number` precision loss above 2^53.
+
+Still deferred (heavier / environment-bound):
+
+- Real-internet NAT traversal: DHT peer discovery + AutoNAT/relay (mDNS covers LAN; internet relay untested in the sandbox).
+- EVM: run solc-compiled OpenZeppelin contracts, event logs, precompiles; promote the canonical chain StateDB to MPT/keccak for byte-for-byte consensus equivalence.
 
 ## License
 

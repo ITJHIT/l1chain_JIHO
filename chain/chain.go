@@ -16,7 +16,18 @@ var (
 	ErrBadPoW         = errors.New("chain: block hash does not meet difficulty")
 	ErrBadTxRoot      = errors.New("chain: merkle root mismatch")
 	ErrBadStateRoot   = errors.New("chain: state root mismatch")
+	// ErrBadChainID is returned when a transaction's ChainID does not match the
+	// chain's configured id. This is the replay-protection rule enforced at the
+	// consensus boundary: it is applied identically by the mining path
+	// (CandidateStateRoot) and the validation path (AddBlock), so a tx signed for
+	// one chain can never be included in or accepted onto another.
+	ErrBadChainID = errors.New("chain: transaction chain id mismatch")
 )
+
+// DefaultChainID is the replay-protection domain used by genesis and every
+// standard flow (CLI, node config, browser signer) unless explicitly overridden
+// via node.Config.ChainID / Chain.SetChainID.
+const DefaultChainID uint64 = 1337
 
 // Chain is an in-memory block store implementing longest-chain (heaviest
 // cumulative difficulty) consensus with reorg. It keeps every valid block it has
@@ -38,6 +49,7 @@ type Chain struct {
 	head        core.Hash
 	headState   state.StateDB
 	heightIndex map[uint64]core.Hash // canonical height -> block hash
+	chainID     uint64 // replay-protection domain enforced on every tx
 }
 
 // NewChain creates a chain seeded with the genesis block. The optional alloc is
@@ -50,6 +62,7 @@ func NewChain(genesis core.Block, alloc ...map[core.Address]uint64) *Chain {
 		blocks:      make(map[core.Hash]core.Block),
 		td:          make(map[core.Hash]uint64),
 		heightIndex: make(map[uint64]core.Hash),
+		chainID:     DefaultChainID,
 	}
 	if len(alloc) > 0 {
 		c.genesisAlloc = alloc[0]
@@ -74,6 +87,28 @@ func (c *Chain) fundGenesis() state.StateDB {
 		st.SetAccount(addr, acct)
 	}
 	return st
+}
+
+// SetChainID overrides the replay-protection domain enforced on every tx. It is
+// set by node.New from Config.ChainID so a node and its chain agree on the id.
+func (c *Chain) SetChainID(id uint64) { c.chainID = id }
+
+// ChainID returns the chain's configured replay-protection domain.
+func (c *Chain) ChainID() uint64 { return c.chainID }
+
+// assertChainID is the single authoritative replay-protection rule. Both the
+// mining path (CandidateStateRoot) and the validation path (AddBlock) call it on
+// the block/candidate transactions, so mining and validation accept exactly the
+// same set of txs. It rejects any tx whose ChainID differs from c.chainID; the
+// signature already commits to ChainID (see core.Transaction.preimage), so a tx
+// cannot both verify and claim a different id than its signer intended.
+func (c *Chain) assertChainID(txs []core.Transaction) error {
+	for i := range txs {
+		if txs[i].ChainID != c.chainID {
+			return ErrBadChainID
+		}
+	}
+	return nil
 }
 
 // chainTo returns the blocks from genesis to hash (inclusive, genesis first) by
@@ -144,6 +179,9 @@ func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address
 	if err != nil {
 		return core.Hash{}, err
 	}
+	if err := c.assertChainID(txs); err != nil {
+		return core.Hash{}, err
+	}
 	for i := range txs {
 		if err := ApplyTx(st, txs[i], verifySig); err != nil {
 			return core.Hash{}, err
@@ -175,6 +213,9 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	}
 	if b.TxRoot() != b.Header.MerkleRoot {
 		return ErrBadTxRoot
+	}
+	if err := c.assertChainID(b.Txs); err != nil {
+		return err
 	}
 
 	// Re-derive state: parent state + this block's transactions + coinbase reward.

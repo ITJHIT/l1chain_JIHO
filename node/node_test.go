@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -22,7 +23,7 @@ func newKeyT(t *testing.T) wallet.Key {
 
 // signedTransfer builds and signs a transfer from -> to.
 func signedTransfer(from wallet.Key, to core.Address, value, nonce uint64) core.Transaction {
-	tx := core.Transaction{To: to, Value: value, Nonce: nonce, GasLimit: 21000}
+	tx := core.Transaction{To: to, Value: value, Nonce: nonce, GasLimit: 21000, ChainID: chain.DefaultChainID}
 	from.Sign(&tx)
 	return tx
 }
@@ -214,5 +215,80 @@ func TestMineBlockGrowsMinerBalanceByReward(t *testing.T) {
 		if got, want := n.Balance(miner), i*chain.BlockReward; got != want {
 			t.Fatalf("after %d blocks miner balance = %d, want %d", i, got, want)
 		}
+	}
+}
+
+// TestReplayAcrossChainIDRejected proves chain-id replay protection end to end.
+// A transfer signed for the default chain id is:
+//   - REJECTED at admission by a node configured for a foreign chain id
+//     (node.ErrBadChainID) and never enters its mempool;
+//   - REJECTED at the consensus boundary by that foreign node when delivered
+//     inside a mined block (chain.ErrBadChainID via AcceptExternalBlock);
+//   - ACCEPTED, mined, and credited by a node configured for the matching id.
+// Because the signature commits to ChainID (core.Transaction.preimage), the tx
+// cannot be re-signed for the other domain without a different key.
+func TestReplayAcrossChainIDRejected(t *testing.T) {
+	const foreignChainID = 4242
+
+	a := newKeyT(t)
+	b := newKeyT(t)
+	alloc := map[core.Address]uint64{a.Address(): 1000}
+
+	// Both nodes share an identical genesis (chain id is NOT part of genesis), so
+	// a block mined on the matching node links cleanly onto the foreign node.
+	nodeA, err := New(Config{
+		MinerKey:         newKeyT(t),
+		Difficulty:       testDifficulty,
+		GenesisAlloc:     alloc,
+		GenesisTimestamp: 1000,
+		ChainID:          chain.DefaultChainID,
+	})
+	if err != nil {
+		t.Fatalf("New A: %v", err)
+	}
+	defer nodeA.Close()
+
+	nodeB, err := New(Config{
+		MinerKey:         newKeyT(t),
+		Difficulty:       testDifficulty,
+		GenesisAlloc:     alloc,
+		GenesisTimestamp: 1000,
+		ChainID:          foreignChainID,
+	})
+	if err != nil {
+		t.Fatalf("New B: %v", err)
+	}
+	defer nodeB.Close()
+
+	// Signed for the default chain id (signedTransfer sets ChainID = DefaultChainID).
+	tx := signedTransfer(a, b.Address(), 100, 0)
+
+	// Admission-level replay protection on the foreign node.
+	if err := nodeB.SubmitTx(tx); !errors.Is(err, ErrBadChainID) {
+		t.Fatalf("nodeB.SubmitTx = %v, want ErrBadChainID", err)
+	}
+	if nodeB.MempoolLen() != 0 {
+		t.Fatalf("foreign-chain tx entered node B mempool")
+	}
+
+	// Matching node accepts and mines the same tx.
+	if err := nodeA.SubmitTx(tx); err != nil {
+		t.Fatalf("nodeA.SubmitTx = %v, want nil", err)
+	}
+	blk, err := nodeA.MineBlock()
+	if err != nil {
+		t.Fatalf("nodeA.MineBlock: %v", err)
+	}
+	if got := nodeA.Balance(b.Address()); got != 100 {
+		t.Fatalf("recipient balance on node A = %d, want 100", got)
+	}
+
+	// Consensus-level replay protection: the foreign node rejects the *block*
+	// carrying the foreign-chain tx through the exact AddBlock validation path.
+	if err := nodeB.AcceptExternalBlock(blk); !errors.Is(err, chain.ErrBadChainID) {
+		t.Fatalf("nodeB.AcceptExternalBlock = %v, want chain.ErrBadChainID", err)
+	}
+	if got := nodeB.Head().Header.Height; got != 0 {
+		t.Fatalf("node B head advanced to %d on a foreign-chain block", got)
 	}
 }

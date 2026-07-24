@@ -32,12 +32,12 @@ func addr(b byte) core.Address {
 // tx builds an unsigned (but non-empty-signature) value transfer, used with
 // acceptAll for invariants that do not depend on real signatures.
 func tx(from, to core.Address, value, nonce uint64) core.Transaction {
-	return core.Transaction{From: from, To: to, Value: value, Nonce: nonce, Signature: []byte{1}}
+	return core.Transaction{From: from, To: to, Value: value, Nonce: nonce, ChainID: chain.DefaultChainID, Signature: []byte{1}}
 }
 
 // signedTx signs a value transfer with k, setting From and a real signature.
 func signedTx(k wallet.Key, to core.Address, value, nonce uint64) core.Transaction {
-	t := core.Transaction{To: to, Value: value, Nonce: nonce}
+	t := core.Transaction{To: to, Value: value, Nonce: nonce, ChainID: chain.DefaultChainID}
 	k.Sign(&t)
 	return t
 }

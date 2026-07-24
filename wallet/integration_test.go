@@ -70,7 +70,7 @@ func TestChainAcceptsRealSignedTransfer(t *testing.T) {
 	c := chain.NewChain(gb, alloc)
 
 	// walletA -> walletB transfer, signed by the real key.
-	txn := core.Transaction{From: walletA.Address(), To: walletB.Address(), Value: 250, Nonce: 0}
+	txn := core.Transaction{From: walletA.Address(), To: walletB.Address(), Value: 250, Nonce: 0, ChainID: chain.DefaultChainID}
 	walletA.Sign(&txn)
 	if !Verify(txn) {
 		t.Fatalf("signed transfer failed Verify before chain application")
@@ -114,7 +114,7 @@ func TestChainRejectsTamperedSignedTransfer(t *testing.T) {
 	gb := genesis.ToBlock()
 	c := chain.NewChain(gb, alloc)
 
-	txn := core.Transaction{From: walletA.Address(), To: walletB.Address(), Value: 250, Nonce: 0}
+	txn := core.Transaction{From: walletA.Address(), To: walletB.Address(), Value: 250, Nonce: 0, ChainID: chain.DefaultChainID}
 	walletA.Sign(&txn)
 	// Tamper the value after signing; the signature no longer matches.
 	txn.Value = 900
