@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/state"
 	"l1chain/vm"
 )
@@ -27,7 +28,6 @@ var (
 // nonce (EVM-ish semantics) but reverts all storage writes.
 const GasPrice uint64 = 1
 
-
 // BlockReward is the coinbase reward credited to a block's miner.
 const BlockReward uint64 = 50
 
@@ -43,12 +43,42 @@ func AcceptNonEmptySig(tx core.Transaction) bool { return len(tx.Signature) > 0 
 // creation (To == zero), a call carrying Data, or a call to an account with
 // code — is routed through the StackVM via applyContractTx.
 func ApplyTx(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool) error {
+	return ApplyTxAt(st, tx, verifySig, 0, 0)
+}
+
+// ApplyTxAt is ApplyTx with the transaction's position in the chain.
+//
+// The exchange needs it: an order's identity is (block height, index within
+// block), which is the only source of order IDs that two validators agree on
+// without coordinating and that a replay from genesis reproduces exactly. A
+// counter kept in the exchange would diverge the moment two nodes processed a
+// different number of rejected transactions.
+//
+// ApplyTx forwards with (0, 0), which is correct for every non-exchange
+// transaction because none of them read the position.
+func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32) error {
 	if verifySig == nil || !verifySig(tx) {
 		return ErrBadSig
 	}
 	from := st.GetAccount(tx.From)
 	if tx.Nonce != from.Nonce {
 		return ErrBadNonce
+	}
+
+	// The exchange is a reserved address the state transition routes to instead
+	// of the VM -- the same shape as a precompile. It is checked before
+	// isContractTx because an order carries calldata and would otherwise be sent
+	// to the StackVM, which has no idea what an order is.
+	if exchange.IsExchangeTx(tx) {
+		if from.Balance < tx.Value {
+			return ErrInsufficientBalance
+		}
+		// The nonce advances before the order runs, exactly as it does for a
+		// contract call: a rejected order must still consume its nonce, or the
+		// sender can replay it and the mempool cannot make progress past it.
+		from.Nonce++
+		st.SetAccount(tx.From, from)
+		return exchange.Apply(st, tx, height, index)
 	}
 
 	if isContractTx(st, tx) {
@@ -141,7 +171,7 @@ func applyContractTx(st state.StateDB, tx core.Transaction, from state.Account) 
 func ApplyBlock(st state.StateDB, b core.Block, miner core.Address, verifySig func(core.Transaction) bool) error {
 	ov := newOverlay(st)
 	for i := range b.Txs {
-		if err := ApplyTx(ov, b.Txs[i], verifySig); err != nil {
+		if err := ApplyTxAt(ov, b.Txs[i], verifySig, b.Header.Height, uint32(i)); err != nil {
 			return err
 		}
 	}

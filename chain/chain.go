@@ -10,7 +10,7 @@ import (
 
 // Chain validation errors.
 var (
-	ErrUnknownParent = errors.New("chain: unknown parent block")
+	ErrUnknownParent  = errors.New("chain: unknown parent block")
 	ErrDuplicateBlock = errors.New("chain: duplicate block")
 	ErrBadHeight      = errors.New("chain: height not parent+1")
 	ErrBadPoW         = errors.New("chain: block hash does not meet difficulty")
@@ -49,7 +49,7 @@ type Chain struct {
 	head        core.Hash
 	headState   state.StateDB
 	heightIndex map[uint64]core.Hash // canonical height -> block hash
-	chainID     uint64 // replay-protection domain enforced on every tx
+	chainID     uint64               // replay-protection domain enforced on every tx
 }
 
 // NewChain creates a chain seeded with the genesis block. The optional alloc is

@@ -3,6 +3,7 @@ module l1chain
 go 1.26
 
 require (
+	github.com/ITJHIT/onchain-orderbook v0.2.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/ethereum/go-ethereum v1.17.4
 	github.com/holiman/uint256 v1.3.2
