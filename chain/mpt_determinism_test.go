@@ -32,13 +32,19 @@ import (
 // TestCandidateStateRootAgreesWithAddBlockAcrossMultipleExchangeBlocks
 // already do for the pre-MPT root.
 func TestMPTDeterministicUnderRealisticMixedWorkload(t *testing.T) {
+	// addr(N) and exAddr(N) both just set byte[0] = N and zero the rest, so
+	// they collide for equal N -- every address below uses a distinct N
+	// across BOTH helpers (found the hard way: an earlier version reused 1
+	// for both sender and trader1, making them the same account and
+	// producing an unrelated-looking ErrBadNonce failure).
 	sender := addr(1)
-	trader1, trader2 := exAddr(1), exAddr(2)
+	recipient := addr(2)
+	trader1, trader2 := exAddr(3), exAddr(4)
 	miner := addr(9)
 	alloc := map[core.Address]uint64{
-		sender:   10_000_000,
-		trader1:  1_000_000,
-		trader2:  1_000_000,
+		sender:  10_000_000,
+		trader1: 1_000_000,
+		trader2: 1_000_000,
 	}
 	contract := vm.CreateAddress(sender, 1) // sender's nonce is 1 at deploy (see block 1)
 
@@ -64,7 +70,7 @@ func TestMPTDeterministicUnderRealisticMixedWorkload(t *testing.T) {
 
 		// Block 1: a plain transfer, then a contract deployment.
 		apply(1,
-			core.Transaction{From: sender, To: addr(2), Value: 100, Nonce: 0, ChainID: DefaultChainID, Signature: []byte{1}},
+			core.Transaction{From: sender, To: recipient, Value: 100, Nonce: 0, ChainID: DefaultChainID, Signature: []byte{1}},
 			core.Transaction{From: sender, To: core.Address{}, Nonce: 1, GasLimit: 100000, ChainID: DefaultChainID, Data: counterCode, Signature: []byte{1}},
 		)
 
