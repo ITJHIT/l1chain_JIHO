@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   DIFFICULTY,
+  EXCHANGE_TRADER_ADDR,
+  EXCHANGE_TRADER_ALLOC,
   FUNDED_ADDR,
   FUNDED_ALLOC,
   GO_BIN,
@@ -67,7 +69,7 @@ export default async function globalSetup() {
     "--rpc-addr", RPC_ADDR,
     "--miner-key", MINER_PRIV,
     "--difficulty", String(DIFFICULTY),
-    "--alloc", `${FUNDED_ADDR}:${FUNDED_ALLOC}`,
+    "--alloc", `${FUNDED_ADDR}:${FUNDED_ALLOC},${EXCHANGE_TRADER_ADDR}:${EXCHANGE_TRADER_ALLOC}`,
     "--mine-interval", MINE_INTERVAL,
   ];
   const logPath = path.join(path.dirname(PID_FILE), "l1node.log");

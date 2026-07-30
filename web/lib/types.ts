@@ -42,3 +42,40 @@ export interface BlockJSON {
   hash: string;
   txs: TxJSON[];
 }
+
+// getOrderBookDepth result: aggregated price levels, best-first each side.
+// price/qty are decimal strings (can be negative in principle -- the wire
+// type is a signed int64 -- though a resting order's qty never is).
+export interface LevelJSON {
+  price: string;
+  qty: string;
+}
+
+export interface OrderBookDepthJSON {
+  bids: LevelJSON[];
+  asks: LevelJSON[];
+}
+
+// getOrderBook result element: one resting order, individually addressed.
+export interface OrderJSON {
+  height: string;
+  index: number;
+  account: string;
+  side: "buy" | "sell";
+  price: string;
+  qty: string;
+}
+
+// getLastAuction result, or null if no batch auction has ever cleared.
+export interface LastAuctionJSON {
+  price: string;
+  volume: string;
+  height: string;
+}
+
+// getExchangeBalance result.
+export interface ExchangeBalanceJSON {
+  base: string;
+  lockedBase: string;
+  lockedQuote: string;
+}

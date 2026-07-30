@@ -22,6 +22,18 @@ export const MINER_PRIV =
   "7ad3ea99db00e5ef4bd93e035865432fe07b5ecfad1ff7b403e89da1d0eeded9";
 export const MINER_ADDR = "32a0ec1f20e5b6457aa985628905baa8ce115565";
 
+// A THIRD funded identity, dedicated to exchange.spec.ts. It exists so that
+// spec places no assumption on -- and makes no assumption about -- FUNDED_PRIV's
+// nonce, which send.spec.ts also spends (hardcoding nonce 0 for "a fresh
+// account"). Playwright's file execution order across specs is not any one
+// spec's to assume; a dedicated genesis-funded key sidesteps the question by
+// construction; nonce 0 is unambiguously correct because nothing else ever
+// signs with this key.
+export const EXCHANGE_TRADER_PRIV =
+  "c84a0547893fda4826146e74a655b5fa0312b80feb8e710fc43828084b75f61b";
+export const EXCHANGE_TRADER_ADDR = "bfd13e27d4cfe7ac20ba26008777aa2ba03e1d85";
+export const EXCHANGE_TRADER_ALLOC = 100_000;
+
 export const RPC_PORT = 8546;
 export const RPC_ADDR = `127.0.0.1:${RPC_PORT}`;
 export const RPC_URL = `http://${RPC_ADDR}`;

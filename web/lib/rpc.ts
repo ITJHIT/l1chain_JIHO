@@ -1,4 +1,12 @@
-import type { BlockJSON, ChainHead, TxJSON } from "./types";
+import type {
+  BlockJSON,
+  ChainHead,
+  ExchangeBalanceJSON,
+  LastAuctionJSON,
+  OrderBookDepthJSON,
+  OrderJSON,
+  TxJSON,
+} from "./types";
 
 // Typed JSON-RPC 2.0 client for the L1 node.
 //
@@ -83,4 +91,32 @@ export async function sendRawTx(tx: TxJSON, base?: string): Promise<string> {
   const r = await rpcCall<{ txHash: string }>("sendRawTx", [tx], base);
   if (!r) throw new Error("sendRawTx returned null");
   return r.txHash;
+}
+
+// getOrderBookDepth() -> {bids, asks}, each best-first.
+export async function getOrderBookDepth(base?: string): Promise<OrderBookDepthJSON> {
+  const r = await rpcCall<OrderBookDepthJSON>("getOrderBookDepth", [], base);
+  return r ?? { bids: [], asks: [] };
+}
+
+// getOrderBook() -> every resting order, individually addressed.
+export async function getOrderBook(base?: string): Promise<OrderJSON[]> {
+  const r = await rpcCall<OrderJSON[]>("getOrderBook", [], base);
+  return r ?? [];
+}
+
+// getLastAuction() -> {price, volume, height} | null. null means no batch
+// auction has ever cleared (fresh chain, or the chain runs Continuous mode).
+export async function getLastAuction(base?: string): Promise<LastAuctionJSON | null> {
+  return rpcCall<LastAuctionJSON>("getLastAuction", [], base);
+}
+
+// getExchangeBalance(addrHex) -> {base, lockedBase, lockedQuote}
+export async function getExchangeBalance(
+  addrHex: string,
+  base?: string,
+): Promise<ExchangeBalanceJSON> {
+  const r = await rpcCall<ExchangeBalanceJSON>("getExchangeBalance", [addrHex], base);
+  if (!r) throw new Error("getExchangeBalance returned null");
+  return r;
 }
