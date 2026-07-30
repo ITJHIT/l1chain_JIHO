@@ -122,3 +122,74 @@ func (c *Client) GetTxByHash(hashHex string) (TxJSON, bool, error) {
 	}
 	return t, true, nil
 }
+
+// LevelJSON is one aggregated price level.
+type LevelJSON struct {
+	Price int64 `json:"price,string"`
+	Qty   int64 `json:"qty,string"`
+}
+
+// OrderBookDepth is the getOrderBookDepth result: bids and asks, best-first.
+type OrderBookDepth struct {
+	Bids []LevelJSON `json:"bids"`
+	Asks []LevelJSON `json:"asks"`
+}
+
+// GetOrderBookDepth returns the on-chain exchange's resting orders aggregated
+// into price levels.
+func (c *Client) GetOrderBookDepth() (OrderBookDepth, error) {
+	var d OrderBookDepth
+	err := c.call("getOrderBookDepth", &d)
+	return d, err
+}
+
+// OrderJSON is one resting order.
+type OrderJSON struct {
+	Height  uint64 `json:"height,string"`
+	Index   uint32 `json:"index"`
+	Account string `json:"account"`
+	Side    string `json:"side"`
+	Price   int64  `json:"price,string"`
+	Qty     int64  `json:"qty,string"`
+}
+
+// GetOrderBook returns every resting order individually, owner included.
+func (c *Client) GetOrderBook() ([]OrderJSON, error) {
+	var out []OrderJSON
+	err := c.call("getOrderBook", &out)
+	return out, err
+}
+
+// LastAuction is the getLastAuction result.
+type LastAuction struct {
+	Price  int64  `json:"price,string"`
+	Volume int64  `json:"volume,string"`
+	Height uint64 `json:"height,string"`
+}
+
+// GetLastAuction returns the most recent batch-auction clear. found is false
+// if none has ever cleared (a fresh chain, or one running Continuous mode).
+func (c *Client) GetLastAuction() (LastAuction, bool, error) {
+	var a LastAuction
+	if err := c.call("getLastAuction", &a); err != nil {
+		return LastAuction{}, false, err
+	}
+	if a.Height == 0 && a.Price == 0 && a.Volume == 0 {
+		return LastAuction{}, false, nil
+	}
+	return a, true, nil
+}
+
+// ExchangeBalance is the getExchangeBalance result.
+type ExchangeBalance struct {
+	Base        uint64 `json:"base,string"`
+	LockedBase  uint64 `json:"lockedBase,string"`
+	LockedQuote uint64 `json:"lockedQuote,string"`
+}
+
+// GetExchangeBalance returns addr's (hex) on-chain-exchange holdings.
+func (c *Client) GetExchangeBalance(addrHex string) (ExchangeBalance, error) {
+	var b ExchangeBalance
+	err := c.call("getExchangeBalance", &b, addrHex)
+	return b, err
+}

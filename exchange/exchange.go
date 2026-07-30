@@ -175,10 +175,11 @@ func IsExchangeTx(tx core.Transaction) bool { return tx.To == Address }
 // ---------------------------------------------------------------------------
 
 const (
-	nsHoldings byte = 0x01
-	nsBookSize byte = 0x02
-	nsOrderA   byte = 0x03
-	nsOrderB   byte = 0x04
+	nsHoldings    byte = 0x01
+	nsBookSize    byte = 0x02
+	nsOrderA      byte = 0x03
+	nsOrderB      byte = 0x04
+	nsLastAuction byte = 0x05
 )
 
 func holdingsKey(addr core.Address) core.Hash {

@@ -20,6 +20,7 @@ import (
 	"l1chain/chain"
 	"l1chain/consensus"
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/store"
 	"l1chain/wallet"
 )
@@ -208,6 +209,58 @@ func (n *Node) Nonce(addr core.Address) uint64 {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.chain.State().GetAccount(addr).Nonce
+}
+
+// OrderBookDepth returns the on-chain exchange's resting orders aggregated
+// into price levels, bids best-first then asks best-first.
+func (n *Node) OrderBookDepth() (bids, asks []exchange.Level, err error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return exchange.Depth(n.chain.State())
+}
+
+// OrderBookSnapshot returns every resting order individually, owner included.
+func (n *Node) OrderBookSnapshot() ([]exchange.OrderView, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return exchange.Snapshot(n.chain.State())
+}
+
+// LastAuction returns the most recent price and volume a batch auction
+// cleared at, and the height it cleared at. ok is false if no auction has
+// ever cleared -- a fresh chain, or one running Continuous mode.
+func (n *Node) LastAuction() (price, volume int64, height uint64, ok bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	p, v, h, ok := exchange.LastAuction(n.chain.State())
+	return int64(p), int64(v), h, ok
+}
+
+// ExchangeBalance returns addr's on-chain-exchange holdings: total and locked
+// base, and locked quote. The unlocked quote balance is the node's ordinary
+// native-coin Balance, since the exchange's quote asset IS the native coin.
+func (n *Node) ExchangeBalance(addr core.Address) (base, lockedBase, lockedQuote uint64) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	base, lockedBase = exchange.BaseOf(n.chain.State(), addr)
+	lockedQuote = exchange.LockedQuoteOf(n.chain.State(), addr)
+	return
+}
+
+// SetExchangeMode configures how future blocks match exchange orders. See
+// chain.Chain.SetExchangeMode for why this should be called once, before
+// mining begins.
+func (n *Node) SetExchangeMode(m exchange.Mode) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.chain.SetExchangeMode(m)
+}
+
+// ExchangeMode returns the currently configured exchange matching mode.
+func (n *Node) ExchangeMode() exchange.Mode {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.chain.ExchangeMode()
 }
 
 // MempoolLen returns the number of pending transactions.

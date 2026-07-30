@@ -168,7 +168,7 @@ func applyTxsAt(st state.StateDB, txs []core.Transaction, verifySig func(core.Tr
 	}
 
 	if session != nil {
-		if _, err := session.Finish(st); err != nil {
+		if _, err := session.Finish(st, height); err != nil {
 			return err
 		}
 	}

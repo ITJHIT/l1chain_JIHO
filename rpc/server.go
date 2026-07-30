@@ -10,6 +10,10 @@
 //	getBalance(addrHex string)     -> {"balance":<u64>}
 //	sendRawTx(tx <TxJSON>)         -> {"txHash":"<hex>"}
 //	getTxByHash(hashHex string)    -> <tx> | null
+//	getOrderBookDepth()            -> {"bids":[{"price","qty"}...],"asks":[...]} best-first
+//	getOrderBook()                 -> [{"height","index","account","side","price","qty"}...]
+//	getLastAuction()               -> {"price","volume","height"} | null (never cleared / Continuous mode)
+//	getExchangeBalance(addrHex)    -> {"base","lockedBase","lockedQuote"}
 //
 // Request envelope (JSON-RPC 2.0), params is a positional array:
 //
@@ -29,6 +33,7 @@ import (
 	"strconv"
 
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/node"
 )
 
@@ -43,9 +48,9 @@ const (
 
 // Request is a JSON-RPC 2.0 request envelope with positional params.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
+	JSONRPC string            `json:"jsonrpc"`
+	ID      json.RawMessage   `json:"id"`
+	Method  string            `json:"method"`
 	Params  []json.RawMessage `json:"params"`
 }
 
@@ -350,9 +355,75 @@ func (s *server) dispatch(req Request) (any, *RPCError) {
 		}
 		return TxToJSON(tx), nil
 
+	case "getOrderBookDepth":
+		bids, asks, err := s.node.OrderBookDepth()
+		if err != nil {
+			return nil, &RPCError{codeInternalError, err.Error()}
+		}
+		return map[string]any{"bids": levelsToJSON(bids), "asks": levelsToJSON(asks)}, nil
+
+	case "getOrderBook":
+		views, err := s.node.OrderBookSnapshot()
+		if err != nil {
+			return nil, &RPCError{codeInternalError, err.Error()}
+		}
+		out := make([]map[string]any, len(views))
+		for i, v := range views {
+			out[i] = map[string]any{
+				"height":  strconv.FormatUint(v.Height, 10),
+				"index":   v.Index,
+				"account": v.Account.Hex(),
+				"side":    v.Side.String(),
+				"price":   strconv.FormatInt(int64(v.Price), 10),
+				"qty":     strconv.FormatInt(int64(v.Qty), 10),
+			}
+		}
+		return out, nil
+
+	case "getLastAuction":
+		price, volume, height, ok := s.node.LastAuction()
+		if !ok {
+			return nil, nil // JSON null: no batch auction has cleared yet
+		}
+		return map[string]any{
+			"price":  strconv.FormatInt(price, 10),
+			"volume": strconv.FormatInt(volume, 10),
+			"height": strconv.FormatUint(height, 10),
+		}, nil
+
+	case "getExchangeBalance":
+		var addrHex string
+		if err := decodeParam(req.Params, 0, &addrHex); err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		addr, err := addressFromHex(addrHex)
+		if err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		base, lockedBase, lockedQuote := s.node.ExchangeBalance(addr)
+		return map[string]any{
+			"base":        strconv.FormatUint(base, 10),
+			"lockedBase":  strconv.FormatUint(lockedBase, 10),
+			"lockedQuote": strconv.FormatUint(lockedQuote, 10),
+		}, nil
+
 	default:
 		return nil, &RPCError{codeMethodNotFound, "unknown method: " + req.Method}
 	}
+}
+
+// levelsToJSON converts aggregated price levels to their wire form. Price and
+// qty are decimal strings for the same reason TxJSON's large integers are: a
+// JS client's Number cannot hold an int64 exactly above 2^53.
+func levelsToJSON(levels []exchange.Level) []map[string]any {
+	out := make([]map[string]any, len(levels))
+	for i, lv := range levels {
+		out[i] = map[string]any{
+			"price": strconv.FormatInt(int64(lv.Price), 10),
+			"qty":   strconv.FormatInt(int64(lv.Qty), 10),
+		}
+	}
+	return out
 }
 
 // decodeParam decodes the i-th positional param into dst.

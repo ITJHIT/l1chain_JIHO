@@ -1,6 +1,8 @@
 package exchange
 
 import (
+	"encoding/binary"
+
 	obchain "github.com/ITJHIT/onchain-orderbook/chain"
 	"github.com/ITJHIT/onchain-orderbook/orderbook"
 
@@ -77,7 +79,14 @@ func (s *BatchSession) Apply(height uint64, index uint32, from core.Address, dat
 // error, because a caller that creates a session up front for every block
 // (rather than only when it already knows one is needed) should not have to
 // special-case the empty case itself.
-func (s *BatchSession) Finish(st state.StateDB) (obchain.AuctionSummary, error) {
+//
+// When the auction actually clears, the price, volume and the height it
+// cleared at are also written to durable storage under nsLastAuction --
+// otherwise the ONLY place this result would ever have existed is the return
+// value handed to whoever mined or validated that one block, gone the moment
+// they moved on. LastAuction lets anyone (an RPC caller, an explorer) ask "what
+// did this market clear at" without having replayed the block that answered it.
+func (s *BatchSession) Finish(st state.StateDB, height uint64) (obchain.AuctionSummary, error) {
 	if !s.touched {
 		return obchain.AuctionSummary{}, nil
 	}
@@ -88,5 +97,33 @@ func (s *BatchSession) Finish(st state.StateDB) (obchain.AuctionSummary, error) 
 	if err := Save(st, s.engine); err != nil {
 		return obchain.AuctionSummary{}, err
 	}
+	if summary.Cleared {
+		writeLastAuction(st, summary.Price, summary.Volume, height)
+	}
 	return summary, nil
+}
+
+func writeLastAuction(st state.StateDB, price orderbook.Price, volume orderbook.Qty, height uint64) {
+	var a, b core.Hash
+	binary.BigEndian.PutUint64(a[0:8], uint64(price))
+	binary.BigEndian.PutUint64(a[8:16], uint64(volume))
+	binary.BigEndian.PutUint64(b[24:32], height)
+	st.SetStorage(Address, indexKey(nsLastAuction, 0), a)
+	st.SetStorage(Address, indexKey(nsLastAuction, 1), b)
+}
+
+// LastAuction returns the most recent price and volume a batch auction
+// cleared at, and the height it cleared at. ok is false if no auction has ever
+// cleared on this chain (a fresh chain, or one that has only ever run
+// Continuous mode).
+func LastAuction(st state.StateDB) (price orderbook.Price, volume orderbook.Qty, height uint64, ok bool) {
+	a := st.GetStorage(Address, indexKey(nsLastAuction, 0))
+	b := st.GetStorage(Address, indexKey(nsLastAuction, 1))
+	if a.IsZero() && b.IsZero() {
+		return 0, 0, 0, false
+	}
+	price = orderbook.Price(binary.BigEndian.Uint64(a[0:8]))
+	volume = orderbook.Qty(binary.BigEndian.Uint64(a[8:16]))
+	height = binary.BigEndian.Uint64(b[24:32])
+	return price, volume, height, true
 }
