@@ -1,0 +1,91 @@
+# Multi-node l1chain testnet demo: node1 (seed + sole miner) plus node2/node3
+# (pure validators -- they sync via gossip/catch-up and never mine),
+# generalizing the manual 2-node walkthrough in README.md to a real,
+# docker-compose-native 3-node mesh.
+#
+#   docker compose up --build
+#   # then, once "mined block" lines appear in node1's log:
+#   curl -s -XPOST http://localhost:8545 \
+#        -d '{"jsonrpc":"2.0","id":1,"method":"getChainHead","params":[]}'
+#   curl -s -XPOST http://localhost:8546 \
+#        -d '{"jsonrpc":"2.0","id":1,"method":"getChainHead","params":[]}'
+#   # node2/node3's height/hash should converge on node1's within a few
+#   # mine-interval cycles.
+#
+# --alloc/--genesis-timestamp/--difficulty are hand-duplicated across all
+# three services rather than centralized (there is no existing "genesis
+# file" abstraction in this codebase to point at -- see README.md's
+# "Multi-node (real libp2p)" section, and cmd/l1/multiprocess_test.go's own
+# TestMultiprocessConvergence, both of which already follow the identical
+# pattern). Keep the three values identical across all services if you
+# change them, or the nodes build different genesis blocks and can never
+# sync past it.
+#
+# `docker compose down -v` between runs: a node with a --db volume reloads
+# whatever it last persisted and IGNORES --alloc/--genesis-timestamp on
+# restart (see chain persistence in store/), so a stale volume from a
+# previous run with different genesis values looks like "nodes won't sync"
+# when it is actually leftover state, not a networking problem.
+services:
+  node1:
+    build: .
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    environment:
+      ADVERTISE_FILE: /shared/node1.addr
+      SERVICE_NAME: node1
+    command:
+      - "--alloc=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1000000000"
+      - "--genesis-timestamp=1750000000"
+      - "--difficulty=10"
+      - "--mine-interval=2s"
+      - "--identity-key=6e6f646531" # hex("node1") -- fixed identity, stable across restarts
+      - "--db=/data/chain.db"
+    ports:
+      - "8545:8545"
+    volumes:
+      - shared:/shared
+      - node1-data:/data
+
+  node2:
+    build: .
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    environment:
+      PEER_WAIT_FILE: /shared/node1.addr
+    command:
+      - "--alloc=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1000000000"
+      - "--genesis-timestamp=1750000000"
+      - "--difficulty=10"
+      - "--mine-interval=1h" # validator only: long enough that it never mines in practice
+      - "--db=/data/chain.db"
+    ports:
+      - "8546:8545"
+    volumes:
+      - shared:/shared
+      - node2-data:/data
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    environment:
+      PEER_WAIT_FILE: /shared/node1.addr
+    command:
+      - "--alloc=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1000000000"
+      - "--genesis-timestamp=1750000000"
+      - "--difficulty=10"
+      - "--mine-interval=1h"
+      - "--db=/data/chain.db"
+    ports:
+      - "8547:8545"
+    volumes:
+      - shared:/shared
+      - node3-data:/data
+    depends_on:
+      - node1
+
+volumes:
+  shared:
+  node1-data:
+  node2-data:
+  node3-data:

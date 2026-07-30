@@ -53,7 +53,7 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 - **Native coin** — account/balance model, ECDSA secp256k1 signatures, genesis allocation, fixed block reward (coinbase credited into canonical state), infinite supply.
 - **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps) against slow/malicious peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
 - **Smart contracts** — a from-scratch stack VM (M3) with Ethereum-numbered opcodes, gas, out-of-gas revert, and CALL depth limits; plus an embedded go-ethereum EVM (M4) that deploys and runs a standard ERC-20 with keccak-derived mapping storage.
-- **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`, `getOrderBookDepth`, `getOrderBook`, `getLastAuction`, `getExchangeBalance`), a CLI (`wallet`/`balance`/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier) plus a live `/exchange` order-book view.
+- **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`, `getOrderBookDepth`, `getOrderBook`, `getLastAuction`, `getExchangeBalance`, `getAccountProof`, `getStorageProof`), a CLI (`wallet`/`balance` [`--verify` for a real light-client check, not a trusted `getBalance`]/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier) plus a live `/exchange` order-book view.
 - **On-chain exchange** — a deterministic limit order book reachable through ordinary signed transactions, in either continuous or batch-auction matching mode. See below.
 
 ## Quickstart
@@ -84,6 +84,32 @@ go run ./cmd/l1 node --rpc-addr 127.0.0.1:8545 --listen 4001 \
 go run ./cmd/l1 node --rpc-addr 127.0.0.1:8546 --listen 4002 \
   --genesis-timestamp 1750000000 --peers /ip4/127.0.0.1/tcp/4001/p2p/<node1-id>
 ```
+
+### Multi-node testnet (Docker Compose)
+
+The manual 2-node walkthrough above generalized to a real 3-container mesh —
+`docker-compose.yml` builds and runs node1 (seed + sole miner) plus node2/
+node3 (pure validators that sync via gossip/catch-up and never mine):
+
+```bash
+docker compose up --build
+# once "mined block" lines appear in node1's log, from another shell:
+curl -s -XPOST http://localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"getChainHead","params":[]}'
+curl -s -XPOST http://localhost:8546 -d '{"jsonrpc":"2.0","id":1,"method":"getChainHead","params":[]}'
+# node2/node3's height and hash converge on node1's within a few
+# mine-interval cycles
+```
+
+Real containers, not an in-process test harness handing each node the
+others' addresses directly: a libp2p peer ID is unknowable to a sibling
+container's static config until the process has already started and printed
+it, and `0.0.0.0` (what a container binds to be reachable from its
+siblings at all) is not a dialable *destination* either. `docker/
+entrypoint.sh` resolves both — node1 advertises `/dns4/node1/tcp/4001/
+p2p/<id>` (Docker's own internal DNS, not a raw IP) over a shared volume
+once it knows its own peer ID; node2/node3 block on that file before
+starting. CI drives this exact compose file end-to-end and polls all three
+nodes' RPC from outside the compose network until they agree.
 
 ### Block explorer
 

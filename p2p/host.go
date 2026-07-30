@@ -10,8 +10,12 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -26,18 +30,74 @@ import (
 // freshly generated Ed25519 identity. Pass listenPort 0 to bind an ephemeral
 // port (recommended for tests). The returned host must be Closed by the caller.
 func NewHost(ctx context.Context, listenPort int) (host.Host, error) {
-	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
-	if err != nil {
-		return nil, fmt.Errorf("p2p: generate identity: %w", err)
+	return NewHostWithConfig(ctx, HostConfig{ListenPort: listenPort})
+}
+
+// HostConfig configures NewHostWithConfig. ListenHost defaults to
+// "127.0.0.1" when empty, matching NewHost's fixed behavior. IdentityKey
+// pins the libp2p peer identity across restarts when non-nil; nil generates
+// a fresh Ed25519 identity every call, also matching NewHost.
+type HostConfig struct {
+	ListenHost  string
+	ListenPort  int
+	IdentityKey crypto.PrivKey
+}
+
+// NewHostWithConfig is NewHost with two additional knobs NewHost's tests
+// never needed, but a real multi-container deployment does:
+//
+//   - ListenHost: binding 127.0.0.1 (NewHost's fixed choice) makes a host
+//     unreachable from sibling Docker containers -- loopback is only
+//     reachable from inside the SAME container's network namespace, so a
+//     compose service dialing another by container name would never
+//     connect even though the port is correctly EXPOSEd. ListenHost lets a
+//     deployment bind 0.0.0.0 (or a specific interface) instead.
+//   - IdentityKey: NewHost generates a fresh Ed25519 identity -- and
+//     therefore a fresh peer ID and full dialable multiaddr -- on every
+//     call, unknowable until the process has already started and printed
+//     it. A compose file (or any static config) cannot reference a peer ID
+//     it doesn't know yet in another service's --peers flag. Pinning the
+//     identity makes the multiaddr computable ahead of time.
+func NewHostWithConfig(ctx context.Context, cfg HostConfig) (host.Host, error) {
+	listenHost := cfg.ListenHost
+	if listenHost == "" {
+		listenHost = "127.0.0.1"
+	}
+	priv := cfg.IdentityKey
+	if priv == nil {
+		var err error
+		priv, _, err = crypto.GenerateKeyPair(crypto.Ed25519, -1)
+		if err != nil {
+			return nil, fmt.Errorf("p2p: generate identity: %w", err)
+		}
 	}
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", listenPort)),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/%d", listenHost, cfg.ListenPort)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("p2p: new host: %w", err)
 	}
 	return h, nil
+}
+
+// IdentityFromSeed deterministically derives a libp2p Ed25519 identity from
+// an arbitrary hex-encoded seed: the same seed always yields the same
+// PrivKey (and therefore the same peer ID), which is the whole point --
+// pinning a node's identity via a CLI flag. The seed is hashed to exactly
+// ed25519's 32-byte seed size first, so any hex string of any length is
+// accepted, not just a pre-formatted 32-byte key.
+func IdentityFromSeed(hexSeed string) (crypto.PrivKey, error) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(hexSeed, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("p2p: identity seed must be hex: %w", err)
+	}
+	seed := sha256.Sum256(raw)
+	priv, _, err := crypto.GenerateEd25519Key(bytes.NewReader(seed[:]))
+	if err != nil {
+		return nil, fmt.Errorf("p2p: derive identity from seed: %w", err)
+	}
+	return priv, nil
 }
 
 // Connect dials host b from host a, registering b's listen addresses in a's
