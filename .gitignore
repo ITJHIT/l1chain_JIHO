@@ -1,8 +1,11 @@
-# Go build outputs
+# Go build outputs. Anchored to the repo root (leading /) so these only match
+# the built binary, not cmd/l1/ -- a bare, unanchored "l1"/"l1.exe" here would
+# also match the cmd/l1/ SOURCE directory by name and gitignore it entirely
+# (found the hard way: cmd/l1/main.go had never been tracked in this repo's
+# history at all, so the Dockerfile's `go build ... ./cmd/l1` would fail on
+# a fresh clone of the public repo -- the CLI source simply wasn't there).
 /l1
 /l1.exe
-l1
-l1.exe
 *.exe
 *.test
 *.out
