@@ -43,3 +43,50 @@ jobs:
         run: npm ci
       - name: Build
         run: npx next build
+
+  testnet:
+    name: Multi-node testnet (docker compose)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the 3-node compose demo
+        run: docker compose up --build -d
+      # Real end-to-end proof, not just "the compose file parses": three
+      # separate containers, three separate libp2p hosts, real gossip and
+      # real PoW mining, polled from OUTSIDE the compose network entirely
+      # (plain curl against the host-mapped RPC ports) until they agree on
+      # the same (height, hash) pair -- the same convergence property
+      # cmd/l1/multiprocess_test.go's TestMultiprocessConvergence already
+      # proves for 3 OS processes, here proved for 3 Docker containers
+      # discovering each other via the docker/entrypoint.sh handshake
+      # instead of a test harness handing them each other's addresses
+      # directly.
+      - name: Wait for all three nodes to converge on the same head
+        timeout-minutes: 3
+        run: |
+          head() {
+            curl -sf -m 2 -XPOST "$1" -d '{"jsonrpc":"2.0","id":1,"method":"getChainHead","params":[]}' \
+              | jq -r '.result.height + ":" + .result.hash'
+          }
+          for i in $(seq 1 60); do
+            H1=$(head http://localhost:8545 2>/dev/null) || H1=""
+            H2=$(head http://localhost:8546 2>/dev/null) || H2=""
+            H3=$(head http://localhost:8547 2>/dev/null) || H3=""
+            echo "attempt $i: node1=$H1 node2=$H2 node3=$H3"
+            if [ -n "$H1" ] && [ "$H1" = "$H2" ] && [ "$H1" = "$H3" ]; then
+              HEIGHT="${H1%%:*}"
+              if [ "$HEIGHT" -ge 2 ] 2>/dev/null; then
+                echo "converged at $H1"
+                exit 0
+              fi
+            fi
+            sleep 3
+          done
+          echo "nodes did not converge within the timeout"
+          exit 1
+      - name: Show node logs
+        if: always()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

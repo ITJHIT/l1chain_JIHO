@@ -13,8 +13,14 @@
 //	    Build, sign, and submit a value transfer over JSON-RPC.
 //
 //	l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> \
-//	        --difficulty <n> --alloc <addrHex:amount,...> --mine-interval <dur>
+//	        --difficulty <n> --alloc <addrHex:amount,...> --mine-interval <dur> \
+//	        --listen-host <host> --listen <port> --peers <multiaddr,...> \
+//	        --identity-key <hex> --mdns
 //	    Run a node with an HTTP JSON-RPC server, mining on an interval.
+//	    --listen-host defaults to 127.0.0.1; set it to 0.0.0.0 to be
+//	    reachable from sibling Docker containers (see docker-compose.yml).
+//	    --identity-key pins the libp2p peer ID across restarts instead of
+//	    generating a fresh one every time.
 package main
 
 import (
@@ -234,10 +240,12 @@ func cmdNode(args []string) error {
 	difficulty := fs.Uint("difficulty", 8, "PoW difficulty (leading zero bits)")
 	allocSpec := fs.String("alloc", "", "genesis alloc: addrHex:amount,addrHex:amount,...")
 	mineInterval := fs.Duration("mine-interval", 5*time.Second, "block mining interval")
+	listenHost := fs.String("listen-host", "127.0.0.1", "libp2p TCP listen host (use 0.0.0.0 to be reachable from sibling Docker containers; loopback is not)")
 	listen := fs.Int("listen", 0, "libp2p TCP listen port (0 = ephemeral)")
 	peers := fs.String("peers", "", "comma-separated libp2p multiaddrs to dial on startup")
 	mdnsEnabled := fs.Bool("mdns", false, "enable mDNS LAN peer auto-discovery (no --peers needed on the same LAN)")
 	genesisTS := fs.Int64("genesis-timestamp", 0, "genesis block unix timestamp; REQUIRED to match across nodes for identical genesis")
+	identityKeyHex := fs.String("identity-key", "", "hex seed for a fixed libp2p peer identity (empty = fresh identity every restart); pins the peer ID so other nodes' --peers can name this node's multiaddr ahead of time")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -286,7 +294,15 @@ func cmdNode(args []string) error {
 
 	// Start real libp2p networking: host, GossipSub, and the sync protocol.
 	// Peers gossip mined blocks and validate every one via AcceptExternalBlock.
-	h, err := p2p.NewHost(ctx, *listen)
+	hostCfg := p2p.HostConfig{ListenHost: *listenHost, ListenPort: *listen}
+	if *identityKeyHex != "" {
+		id, err := p2p.IdentityFromSeed(*identityKeyHex)
+		if err != nil {
+			return err
+		}
+		hostCfg.IdentityKey = id
+	}
+	h, err := p2p.NewHostWithConfig(ctx, hostCfg)
 	if err != nil {
 		return fmt.Errorf("p2p host: %w", err)
 	}
