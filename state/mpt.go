@@ -155,3 +155,16 @@ func (s *mptStateDB) SetStorage(addr core.Address, key, val core.Hash) {
 // behavior.
 func (s *mptStateDB) StateRoot() core.Hash { return s.root }
 func (s *mptStateDB) Commit() core.Hash    { return s.root }
+
+// AccountProof and StorageProof implement ProofCapable, generating a Merkle
+// proof against this StateDB's CURRENT root -- a caller that wants a proof
+// tied to a specific block should call these before any further mutation
+// (the RPC layer's lock scope over the canonical head state guarantees this;
+// see node.Node.AccountProof).
+func (s *mptStateDB) AccountProof(addr core.Address) (AccountProof, bool) {
+	return GenerateAccountProof(s.nodes, s.root, addr)
+}
+
+func (s *mptStateDB) StorageProof(addr core.Address, key core.Hash) (StorageProof, bool) {
+	return GenerateStorageProof(s.nodes, s.root, addr, key)
+}
