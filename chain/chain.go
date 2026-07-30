@@ -136,9 +136,17 @@ func (c *Chain) chainTo(hash core.Hash) ([]core.Block, bool) {
 // applyBlockRewarded applies every transaction in b to st in order, then credits
 // BlockReward to b.Header.Coinbase (the miner). The genesis block (height 0) is
 // never rewarded. It mutates st in place and returns the first tx error.
+//
+// Each transaction is applied via ApplyTxAt with its real (height, index): this
+// is what the exchange package uses as an order's identity, and it is the ONLY
+// path a real block takes on the way into canonical state. A plain ApplyTx call
+// here would silently forward (0, 0) for every transaction in every block ever
+// mined, which does not fail a single test in isolation but collides the
+// identity of every order ever placed on the chain -- Cancel could no longer
+// tell one user's resting order from another's.
 func applyBlockRewarded(st state.StateDB, b core.Block, verifySig func(core.Transaction) bool) error {
 	for j := range b.Txs {
-		if err := ApplyTx(st, b.Txs[j], verifySig); err != nil {
+		if err := ApplyTxAt(st, b.Txs[j], verifySig, b.Header.Height, uint32(j)); err != nil {
 			return err
 		}
 	}
@@ -182,8 +190,13 @@ func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address
 	if err := c.assertChainID(txs); err != nil {
 		return core.Hash{}, err
 	}
+	// The candidate block does not exist yet, so its height is derived rather
+	// than read from a header: one past the current head's. AddBlock enforces
+	// exactly this relationship (ErrBadHeight), so a miner using any other value
+	// here would compute a root AddBlock could never actually validate.
+	height := c.blocks[c.head].Header.Height + 1
 	for i := range txs {
-		if err := ApplyTx(st, txs[i], verifySig); err != nil {
+		if err := ApplyTxAt(st, txs[i], verifySig, height, uint32(i)); err != nil {
 			return core.Hash{}, err
 		}
 	}
