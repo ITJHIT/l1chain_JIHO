@@ -13,6 +13,19 @@ type AccountProof struct {
 	Proof   trie.Proof
 }
 
+// ProofCapable is implemented by StateDB backends that can generate Merkle
+// proofs of their own current state -- the MPT-backed production
+// implementation (state.New()) does; the flat-hash memStateDB structurally
+// cannot (there is no trie to walk). A caller holding a plain StateDB (e.g.
+// the RPC layer, which only ever sees the interface) type-asserts to this to
+// find out whether proof generation is available:
+//
+//	pc, ok := st.(state.ProofCapable)
+type ProofCapable interface {
+	AccountProof(addr core.Address) (AccountProof, bool)
+	StorageProof(addr core.Address, key core.Hash) (StorageProof, bool)
+}
+
 // GenerateAccountProof returns a proof that addr's account (as returned by
 // GetAccount) is present under stateRoot. found is false if the address has
 // no account (an empty/never-touched address) -- there is nothing to prove

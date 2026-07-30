@@ -21,6 +21,7 @@ import (
 	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/exchange"
+	"l1chain/state"
 	"l1chain/store"
 	"l1chain/wallet"
 )
@@ -209,6 +210,45 @@ func (n *Node) Nonce(addr core.Address) uint64 {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.chain.State().GetAccount(addr).Nonce
+}
+
+// AccountProof returns a Merkle proof of addr's account under the canonical
+// head, plus the head height/StateRoot the proof was generated against --
+// both read under the same lock as the proof itself, so a concurrent
+// MineBlock/AcceptExternalBlock cannot advance the head between computing
+// the proof and reading the height/root it corresponds to. ok is false if
+// the address has no account, or if the current StateDB backend does not
+// support proofs at all (never true for the production state.New()
+// backend; only reachable if something swapped in a non-MPT StateDB).
+func (n *Node) AccountProof(addr core.Address) (proof state.AccountProof, height uint64, stateRoot core.Hash, ok bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	pc, supported := n.chain.State().(state.ProofCapable)
+	if !supported {
+		return state.AccountProof{}, 0, core.Hash{}, false
+	}
+	proof, found := pc.AccountProof(addr)
+	if !found {
+		return state.AccountProof{}, 0, core.Hash{}, false
+	}
+	head := n.chain.Head()
+	return proof, head.Header.Height, head.Header.StateRoot, true
+}
+
+// StorageProof is AccountProof for one of addr's storage slots.
+func (n *Node) StorageProof(addr core.Address, key core.Hash) (proof state.StorageProof, height uint64, stateRoot core.Hash, ok bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	pc, supported := n.chain.State().(state.ProofCapable)
+	if !supported {
+		return state.StorageProof{}, 0, core.Hash{}, false
+	}
+	proof, found := pc.StorageProof(addr, key)
+	if !found {
+		return state.StorageProof{}, 0, core.Hash{}, false
+	}
+	head := n.chain.Head()
+	return proof, head.Header.Height, head.Header.StateRoot, true
 }
 
 // OrderBookDepth returns the on-chain exchange's resting orders aggregated

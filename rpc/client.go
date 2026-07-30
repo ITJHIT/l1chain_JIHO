@@ -3,9 +3,11 @@ package rpc
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"l1chain/core"
+	"l1chain/state"
 )
 
 // Client is a tiny JSON-RPC client for the API served by NewServer. It is used
@@ -192,4 +194,92 @@ func (c *Client) GetExchangeBalance(addrHex string) (ExchangeBalance, error) {
 	var b ExchangeBalance
 	err := c.call("getExchangeBalance", &b, addrHex)
 	return b, err
+}
+
+// AccountProofResult is the getAccountProof result: the proof, plus the
+// height/stateRoot it was generated against (so the caller can fetch that
+// exact block's header and verify the two actually agree).
+type AccountProofResult struct {
+	Height    uint64           `json:"height,string"`
+	StateRoot string           `json:"stateRoot"`
+	Proof     AccountProofJSON `json:"proof"`
+}
+
+// GetAccountProof returns a Merkle proof of addr's (hex) account under the
+// node's canonical head. found is false for a null result (no account at
+// that address). This is the raw, unverified server response -- call
+// VerifyAccountProof separately (against a StateRoot the caller trusts on
+// its own) to actually check it rather than trust the node blindly.
+func (c *Client) GetAccountProof(addrHex string) (AccountProofResult, bool, error) {
+	var out AccountProofResult
+	if err := c.call("getAccountProof", &out, addrHex); err != nil {
+		return AccountProofResult{}, false, err
+	}
+	if out.StateRoot == "" {
+		return AccountProofResult{}, false, nil
+	}
+	return out, true, nil
+}
+
+// StorageProofResult is the getStorageProof result.
+type StorageProofResult struct {
+	Height    uint64           `json:"height,string"`
+	StateRoot string           `json:"stateRoot"`
+	Proof     StorageProofJSON `json:"proof"`
+}
+
+// GetStorageProof returns a Merkle proof of addr's (hex) storage at key
+// (hex) under the node's canonical head.
+func (c *Client) GetStorageProof(addrHex, keyHex string) (StorageProofResult, bool, error) {
+	var out StorageProofResult
+	if err := c.call("getStorageProof", &out, addrHex, keyHex); err != nil {
+		return StorageProofResult{}, false, err
+	}
+	if out.StateRoot == "" {
+		return StorageProofResult{}, false, nil
+	}
+	return out, true, nil
+}
+
+// VerifyAccountProof decodes ap and checks it against stateRootHex/addrHex
+// independently -- the caller supplies a StateRoot it trusts on its own
+// (e.g. from a header whose PoW it verified itself), not one taken from the
+// same response being checked. This is the actual light-client check: a
+// node cannot make this pass by lying in getBalance/getAccountProof unless
+// it can also forge a proof against a root it does not control.
+func VerifyAccountProof(stateRootHex, addrHex string, ap AccountProofJSON) (state.Account, bool, error) {
+	stateRoot, err := hashFromHex(stateRootHex)
+	if err != nil {
+		return state.Account{}, false, fmt.Errorf("stateRoot: %w", err)
+	}
+	addr, err := addressFromHex(addrHex)
+	if err != nil {
+		return state.Account{}, false, fmt.Errorf("addr: %w", err)
+	}
+	proof, err := accountProofFromJSON(ap)
+	if err != nil {
+		return state.Account{}, false, fmt.Errorf("proof: %w", err)
+	}
+	return proof.Account, state.VerifyAccountProof(stateRoot, addr, proof), nil
+}
+
+// VerifyStorageProof is VerifyAccountProof for a getStorageProof result.
+func VerifyStorageProof(stateRootHex, addrHex, keyHex string, sp StorageProofJSON) (core.Hash, bool, error) {
+	stateRoot, err := hashFromHex(stateRootHex)
+	if err != nil {
+		return core.Hash{}, false, fmt.Errorf("stateRoot: %w", err)
+	}
+	addr, err := addressFromHex(addrHex)
+	if err != nil {
+		return core.Hash{}, false, fmt.Errorf("addr: %w", err)
+	}
+	key, err := hashFromHex(keyHex)
+	if err != nil {
+		return core.Hash{}, false, fmt.Errorf("key: %w", err)
+	}
+	proof, err := storageProofFromJSON(sp)
+	if err != nil {
+		return core.Hash{}, false, fmt.Errorf("proof: %w", err)
+	}
+	return proof.Value, state.VerifyStorageProof(stateRoot, addr, key, proof), nil
 }

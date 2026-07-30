@@ -14,6 +14,14 @@
 //	getOrderBook()                 -> [{"height","index","account","side","price","qty"}...]
 //	getLastAuction()               -> {"price","volume","height"} | null (never cleared / Continuous mode)
 //	getExchangeBalance(addrHex)    -> {"base","lockedBase","lockedQuote"}
+//	getAccountProof(addrHex)       -> {"height","stateRoot","proof":<AccountProofJSON>} | null
+//	getStorageProof(addrHex, keyHex) -> {"height","stateRoot","proof":<StorageProofJSON>} | null
+//
+// getAccountProof/getStorageProof are the light-client primitive: the caller
+// verifies the returned proof against a StateRoot it trusts on its own (e.g.
+// from a header whose PoW it checked itself), rather than trusting this
+// node's getBalance response blindly. See state.VerifyAccountProof /
+// state.VerifyStorageProof.
 //
 // Request envelope (JSON-RPC 2.0), params is a positional array:
 //
@@ -35,6 +43,8 @@ import (
 	"l1chain/core"
 	"l1chain/exchange"
 	"l1chain/node"
+	"l1chain/state"
+	"l1chain/trie"
 )
 
 // JSON-RPC 2.0 standard error codes used by this server.
@@ -104,6 +114,119 @@ type BlockJSON struct {
 	Header HeaderJSON `json:"header"`
 	Hash   string     `json:"hash"`
 	Txs    []TxJSON   `json:"txs"`
+}
+
+// AccountJSON is the wire representation of a state.Account.
+type AccountJSON struct {
+	Balance     uint64 `json:"balance,string"`
+	Nonce       uint64 `json:"nonce,string"`
+	CodeHash    string `json:"codeHash"`
+	StorageRoot string `json:"storageRoot"`
+}
+
+// AccountProofJSON is the wire representation of a state.AccountProof: the
+// claimed account plus an ordered root-to-leaf list of hex-encoded trie node
+// encodings, verifiable offline against a StateRoot the caller trusts on its
+// own (see state.VerifyAccountProof) -- this is the light-client primitive
+// getAccountProof exists for.
+type AccountProofJSON struct {
+	Account AccountJSON `json:"account"`
+	Proof   []string    `json:"proof"`
+}
+
+// StorageProofJSON is the wire representation of a state.StorageProof: a
+// chained two-stage proof, the account proof plus a slot proof rooted at
+// that account's own (proven) StorageRoot.
+type StorageProofJSON struct {
+	AccountProof AccountProofJSON `json:"accountProof"`
+	SlotProof    []string         `json:"slotProof"`
+	Value        string           `json:"value"`
+}
+
+func accountToJSON(a state.Account) AccountJSON {
+	return AccountJSON{
+		Balance:     a.Balance,
+		Nonce:       a.Nonce,
+		CodeHash:    a.CodeHash.Hex(),
+		StorageRoot: a.StorageRoot.Hex(),
+	}
+}
+
+func proofToJSON(p trie.Proof) []string {
+	out := make([]string, len(p))
+	for i, n := range p {
+		out[i] = hex.EncodeToString(n)
+	}
+	return out
+}
+
+func accountProofToJSON(ap state.AccountProof) AccountProofJSON {
+	return AccountProofJSON{Account: accountToJSON(ap.Account), Proof: proofToJSON(ap.Proof)}
+}
+
+func storageProofToJSON(sp state.StorageProof) StorageProofJSON {
+	return StorageProofJSON{
+		AccountProof: accountProofToJSON(sp.AccountProof),
+		SlotProof:    proofToJSON(sp.SlotProof),
+		Value:        sp.Value.Hex(),
+	}
+}
+
+// accountFromJSON, proofFromJSON and the Account/StorageProofFromJSON below
+// exist for the verifying side (the CLI light-client path): they turn the
+// wire form back into the Go types state.VerifyAccountProof/
+// VerifyStorageProof actually check.
+
+func accountFromJSON(j AccountJSON) (state.Account, error) {
+	codeHash, err := hashFromHex(j.CodeHash)
+	if err != nil {
+		return state.Account{}, fmt.Errorf("codeHash: %w", err)
+	}
+	storageRoot, err := hashFromHex(j.StorageRoot)
+	if err != nil {
+		return state.Account{}, fmt.Errorf("storageRoot: %w", err)
+	}
+	return state.Account{Balance: j.Balance, Nonce: j.Nonce, CodeHash: codeHash, StorageRoot: storageRoot}, nil
+}
+
+func proofFromJSON(j []string) (trie.Proof, error) {
+	out := make(trie.Proof, len(j))
+	for i, s := range j {
+		b, err := hexBytes(s)
+		if err != nil {
+			return nil, fmt.Errorf("proof[%d]: %w", i, err)
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+func accountProofFromJSON(j AccountProofJSON) (state.AccountProof, error) {
+	acct, err := accountFromJSON(j.Account)
+	if err != nil {
+		return state.AccountProof{}, err
+	}
+	proof, err := proofFromJSON(j.Proof)
+	if err != nil {
+		return state.AccountProof{}, err
+	}
+	return state.AccountProof{Account: acct, Proof: proof}, nil
+}
+
+func storageProofFromJSON(j StorageProofJSON) (state.StorageProof, error) {
+	ap, err := accountProofFromJSON(j.AccountProof)
+	if err != nil {
+		return state.StorageProof{}, err
+	}
+	slotProof, err := proofFromJSON(j.SlotProof)
+	if err != nil {
+		return state.StorageProof{}, err
+	}
+	value, err := hashFromHex(j.Value)
+	if err != nil {
+		return state.StorageProof{}, fmt.Errorf("value: %w", err)
+	}
+	return state.StorageProof{AccountProof: ap, SlotProof: slotProof, Value: value}, nil
 }
 
 // ---- conversions -------------------------------------------------------------
@@ -405,6 +528,51 @@ func (s *server) dispatch(req Request) (any, *RPCError) {
 			"base":        strconv.FormatUint(base, 10),
 			"lockedBase":  strconv.FormatUint(lockedBase, 10),
 			"lockedQuote": strconv.FormatUint(lockedQuote, 10),
+		}, nil
+
+	case "getAccountProof":
+		var addrHex string
+		if err := decodeParam(req.Params, 0, &addrHex); err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		addr, err := addressFromHex(addrHex)
+		if err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		ap, height, root, ok := s.node.AccountProof(addr)
+		if !ok {
+			return nil, nil // JSON null: no account at this address
+		}
+		return map[string]any{
+			"height":    strconv.FormatUint(height, 10),
+			"stateRoot": root.Hex(),
+			"proof":     accountProofToJSON(ap),
+		}, nil
+
+	case "getStorageProof":
+		var addrHex, keyHex string
+		if err := decodeParam(req.Params, 0, &addrHex); err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		if err := decodeParam(req.Params, 1, &keyHex); err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		addr, err := addressFromHex(addrHex)
+		if err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		key, err := hashFromHex(keyHex)
+		if err != nil {
+			return nil, &RPCError{codeInvalidParams, err.Error()}
+		}
+		sp, height, root, ok := s.node.StorageProof(addr, key)
+		if !ok {
+			return nil, nil // JSON null: no account, or the slot was never set
+		}
+		return map[string]any{
+			"height":    strconv.FormatUint(height, 10),
+			"stateRoot": root.Hex(),
+			"proof":     storageProofToJSON(sp),
 		}, nil
 
 	default:
