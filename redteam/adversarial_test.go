@@ -60,7 +60,7 @@ func headHash(c *chain.Chain) core.Hash {
 // excluded) plus each block's coinbase reward on top of alloc. It mirrors the
 // engine's tx-plus-reward replay so built blocks carry a self-consistent root.
 func replayBranch(alloc map[core.Address]uint64, branch []core.Block) state.StateDB {
-	st := state.NewMemStateDB()
+	st := state.New()
 	for a, bal := range alloc {
 		acct := st.GetAccount(a)
 		acct.Balance += bal

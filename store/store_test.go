@@ -106,7 +106,7 @@ func buildChain(t *testing.T, sender, recipient wallet.Key, nBlocks int) (*chain
 
 	// Running state mirrors chain derivation (alloc + applied txs) so each block's
 	// StateRoot is correct.
-	running := state.NewMemStateDB()
+	running := state.New()
 	for a, bal := range alloc {
 		acct := running.GetAccount(a)
 		acct.Balance += bal

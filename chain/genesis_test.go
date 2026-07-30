@@ -20,7 +20,7 @@ func TestApplyGenesisFundsAllocAndStateRoot(t *testing.T) {
 		Timestamp:  1000,
 	}
 
-	st := state.NewMemStateDB()
+	st := state.New()
 	blk := ApplyGenesis(st, g)
 
 	if got := st.GetAccount(addr(1)).Balance; got != 1000 {
@@ -40,7 +40,7 @@ func TestApplyGenesisFundsAllocAndStateRoot(t *testing.T) {
 	}
 
 	// Independently funded state must yield the same root (determinism).
-	ref := state.NewMemStateDB()
+	ref := state.New()
 	ref.SetAccount(addr(1), state.Account{Balance: 1000})
 	ref.SetAccount(addr(2), state.Account{Balance: 500})
 	if blk.Header.StateRoot != ref.StateRoot() {

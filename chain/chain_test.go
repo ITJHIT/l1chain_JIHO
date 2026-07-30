@@ -16,7 +16,7 @@ var testMiner = addr(9)
 // replayBranch reproduces the state after applying the txs of the given branch
 // (genesis excluded from txs) plus each block's coinbase reward on top of alloc.
 func replayBranch(alloc map[core.Address]uint64, branch []core.Block) state.StateDB {
-	st := state.NewMemStateDB()
+	st := state.New()
 	for a, b := range alloc {
 		acct := st.GetAccount(a)
 		acct.Balance += b
