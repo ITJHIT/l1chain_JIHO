@@ -5,6 +5,7 @@ import (
 
 	"l1chain/consensus"
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/state"
 )
 
@@ -50,7 +51,26 @@ type Chain struct {
 	headState   state.StateDB
 	heightIndex map[uint64]core.Hash // canonical height -> block hash
 	chainID     uint64               // replay-protection domain enforced on every tx
+
+	// exchangeMode governs every block's exchange transactions, mining and
+	// validation alike -- the zero value is exchange.Continuous, so a chain
+	// that never calls SetExchangeMode behaves exactly as it did before this
+	// field existed. Like chainID, it is meant to be set once, immediately
+	// after NewChain, and never touched again: deriveState replays the WHOLE
+	// chain from genesis using whatever exchangeMode is current at replay time,
+	// so changing it after blocks already exist would make historical blocks
+	// re-derive under a mode different from the one they were actually mined
+	// and validated under.
+	exchangeMode exchange.Mode
 }
+
+// SetExchangeMode sets the matching mode every block's exchange transactions
+// are applied under. See the exchangeMode field comment for why this should be
+// called once, before mining begins, and not changed afterward.
+func (c *Chain) SetExchangeMode(m exchange.Mode) { c.exchangeMode = m }
+
+// ExchangeMode returns the currently configured exchange matching mode.
+func (c *Chain) ExchangeMode() exchange.Mode { return c.exchangeMode }
 
 // NewChain creates a chain seeded with the genesis block. The optional alloc is
 // the genesis allocation (same map given to ApplyGenesis); it is required for
@@ -137,18 +157,16 @@ func (c *Chain) chainTo(hash core.Hash) ([]core.Block, bool) {
 // BlockReward to b.Header.Coinbase (the miner). The genesis block (height 0) is
 // never rewarded. It mutates st in place and returns the first tx error.
 //
-// Each transaction is applied via ApplyTxAt with its real (height, index): this
-// is what the exchange package uses as an order's identity, and it is the ONLY
-// path a real block takes on the way into canonical state. A plain ApplyTx call
-// here would silently forward (0, 0) for every transaction in every block ever
-// mined, which does not fail a single test in isolation but collides the
-// identity of every order ever placed on the chain -- Cancel could no longer
-// tell one user's resting order from another's.
-func applyBlockRewarded(st state.StateDB, b core.Block, verifySig func(core.Transaction) bool) error {
-	for j := range b.Txs {
-		if err := ApplyTxAt(st, b.Txs[j], verifySig, b.Header.Height, uint32(j)); err != nil {
-			return err
-		}
+// Transactions go through applyTxsAt with b's real height and the given
+// exchange mode -- the ONLY path a real block takes on the way into canonical
+// state. A plain per-tx ApplyTx call here would silently forward (0, 0) for
+// every transaction in every block ever mined, which does not fail a single
+// test in isolation but collides the identity of every order ever placed on
+// the chain -- Cancel could no longer tell one user's resting order from
+// another's. (It did, for one commit's worth of this repository's history.)
+func applyBlockRewarded(st state.StateDB, b core.Block, verifySig func(core.Transaction) bool, mode exchange.Mode) error {
+	if err := applyTxsAt(st, b.Txs, verifySig, b.Header.Height, mode); err != nil {
+		return err
 	}
 	if b.Header.Height != 0 {
 		acct := st.GetAccount(b.Header.Coinbase)
@@ -168,7 +186,7 @@ func (c *Chain) deriveState(hash core.Hash, verifySig func(core.Transaction) boo
 	}
 	st := c.fundGenesis()
 	for i := 1; i < len(path); i++ { // skip genesis (no txs, no reward)
-		if err := applyBlockRewarded(st, path[i], verifySig); err != nil {
+		if err := applyBlockRewarded(st, path[i], verifySig, c.exchangeMode); err != nil {
 			return nil, err
 		}
 	}
@@ -195,10 +213,8 @@ func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address
 	// exactly this relationship (ErrBadHeight), so a miner using any other value
 	// here would compute a root AddBlock could never actually validate.
 	height := c.blocks[c.head].Header.Height + 1
-	for i := range txs {
-		if err := ApplyTxAt(st, txs[i], verifySig, height, uint32(i)); err != nil {
-			return core.Hash{}, err
-		}
+	if err := applyTxsAt(st, txs, verifySig, height, c.exchangeMode); err != nil {
+		return core.Hash{}, err
 	}
 	m := st.GetAccount(coinbase)
 	m.Balance += BlockReward
@@ -236,7 +252,7 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	if err != nil {
 		return err
 	}
-	if err := applyBlockRewarded(st, b, verifySig); err != nil {
+	if err := applyBlockRewarded(st, b, verifySig, c.exchangeMode); err != nil {
 		return err
 	}
 	if st.StateRoot() != b.Header.StateRoot {

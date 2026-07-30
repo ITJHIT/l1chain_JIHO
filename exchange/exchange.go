@@ -45,6 +45,24 @@ import (
 	"l1chain/state"
 )
 
+// Mode selects how a block's orders are matched. Re-exported from the
+// underlying engine so callers outside this package -- Chain, in particular --
+// never need to import the vendored module directly. exchange is the seam;
+// nothing above it should have to know a second module exists.
+type Mode = obchain.Mode
+
+const (
+	// Continuous matches each order against the book as it is applied: lowest
+	// latency to execution, and whoever is earlier in the block takes the
+	// better resting price. On a chain, "earlier" is decided by whoever orders
+	// the block, which hands the block producer a free option on every trade.
+	Continuous = obchain.Continuous
+	// BatchAuction clears every order in a block at one uniform price via
+	// BatchSession, removing that option: position within the block stops
+	// mattering to the outcome.
+	BatchAuction = obchain.BatchAuction
+)
+
 // Address is the reserved account the exchange lives at. Transactions sent here
 // are routed to the book instead of the VM.
 var Address = core.Address{

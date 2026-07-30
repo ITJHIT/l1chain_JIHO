@@ -57,6 +57,28 @@ func ApplyTx(st state.StateDB, tx core.Transaction, verifySig func(core.Transact
 // ApplyTx forwards with (0, 0), which is correct for every non-exchange
 // transaction because none of them read the position.
 func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32) error {
+	return applyTxAtSession(st, tx, verifySig, height, index, nil)
+}
+
+// applyTxAtSession is ApplyTxAt with an optional BatchSession.
+//
+// This is the ONE place that decides how an exchange transaction is handled --
+// deliberately, after this package shipped with two call sites that each
+// dispatched to the state transition independently and only one of them ever
+// got the exchange routing fixed when it needed to change (see the commit that
+// added ApplyTxAt in the first place: it fixed transition.go's ApplyBlock,
+// which turned out to have no production callers, while chain.go's actual
+// consensus path kept calling the old bare ApplyTx for another commit's worth
+// of history). Every caller in this package, continuous or batch, production
+// or test, now goes through this one function.
+//
+// session == nil means Continuous semantics: an exchange transaction settles
+// immediately via exchange.Apply, exactly as it always has. session != nil
+// means a BatchAuction block is in progress: an exchange transaction is staged
+// into that session instead, and nothing about it settles until the caller
+// runs session.Finish once, after every transaction in the block has been
+// through this function.
+func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32, session *exchange.BatchSession) error {
 	if verifySig == nil || !verifySig(tx) {
 		return ErrBadSig
 	}
@@ -78,6 +100,9 @@ func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transa
 		// sender can replay it and the mempool cannot make progress past it.
 		from.Nonce++
 		st.SetAccount(tx.From, from)
+		if session != nil {
+			return session.Apply(height, index, tx.From, tx.Data)
+		}
 		return exchange.Apply(st, tx, height, index)
 	}
 
@@ -102,6 +127,51 @@ func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transa
 	to.Balance += tx.Value
 	st.SetAccount(tx.From, from)
 	st.SetAccount(tx.To, to)
+	return nil
+}
+
+// applyTxsAt applies every tx in txs against st in order, at the given block
+// height, under the given exchange mode.
+//
+// This is the single point Chain.AddBlock's re-derivation (applyBlockRewarded)
+// and Chain.CandidateStateRoot both go through for their transaction loop --
+// on purpose, so mining and validation can never again independently drift the
+// way the bare-ApplyTx bug let them. In BatchAuction mode a session is opened
+// once, before the loop, and every exchange transaction in the block is staged
+// into it rather than settled on the spot; Finish runs once, after the loop,
+// clearing everything that was staged at a single price. In Continuous mode
+// (mode's zero value, so an unconfigured Chain behaves exactly as it always
+// has) there is no session and nothing changes from before this function
+// existed.
+func applyTxsAt(st state.StateDB, txs []core.Transaction, verifySig func(core.Transaction) bool, height uint64, mode exchange.Mode) error {
+	var session *exchange.BatchSession
+	if mode == exchange.BatchAuction {
+		var senders []core.Address
+		for i := range txs {
+			if exchange.IsExchangeTx(txs[i]) {
+				senders = append(senders, txs[i].From)
+			}
+		}
+		if len(senders) > 0 {
+			s, err := exchange.NewBatchSession(st, senders...)
+			if err != nil {
+				return err
+			}
+			session = s
+		}
+	}
+
+	for i := range txs {
+		if err := applyTxAtSession(st, txs[i], verifySig, height, uint32(i), session); err != nil {
+			return err
+		}
+	}
+
+	if session != nil {
+		if _, err := session.Finish(st); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -168,12 +238,23 @@ func applyContractTx(st state.StateDB, tx core.Transaction, from state.Account) 
 // to miner (coinbase). Application is atomic: if any transaction fails, st is
 // left unchanged and the tx error is returned. Transactions are staged on an
 // overlay and only flushed to st once the whole block succeeds.
+//
+// Exchange orders are matched continuously. Use ApplyBlockWithMode for
+// BatchAuction.
 func ApplyBlock(st state.StateDB, b core.Block, miner core.Address, verifySig func(core.Transaction) bool) error {
+	return ApplyBlockWithMode(st, b, miner, verifySig, exchange.Continuous)
+}
+
+// ApplyBlockWithMode is ApplyBlock under an explicit exchange mode. Chain uses
+// the equivalent path internally (applyBlockRewarded) with its own configured
+// mode; this is the same machinery for a caller that wants block application
+// without the rest of the consensus/mining apparatus -- a standalone
+// simulation, or a test that wants to compare two orderings of one block
+// without needing two different chains to do it.
+func ApplyBlockWithMode(st state.StateDB, b core.Block, miner core.Address, verifySig func(core.Transaction) bool, mode exchange.Mode) error {
 	ov := newOverlay(st)
-	for i := range b.Txs {
-		if err := ApplyTxAt(ov, b.Txs[i], verifySig, b.Header.Height, uint32(i)); err != nil {
-			return err
-		}
+	if err := applyTxsAt(ov, b.Txs, verifySig, b.Header.Height, mode); err != nil {
+		return err
 	}
 	m := ov.GetAccount(miner)
 	m.Balance += BlockReward
