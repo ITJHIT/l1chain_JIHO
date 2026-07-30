@@ -30,6 +30,16 @@ const (
 // maxConcurrentSyncs bounds catch-up syncs running at once across all peers.
 const maxConcurrentSyncs = 4
 
+// maxConcurrentInboundSyncs bounds how many SyncProtocol streams this node
+// will SERVE at once, across all requesting peers. Found missing entirely:
+// maxConcurrentSyncs above only ever bounded this node's own outbound
+// catch-up requests (dispatched off the gossip read loop); nothing capped
+// how many peers could simultaneously open an inbound sync stream against
+// this node as responder. A handful of peers doing that at once, each
+// asking for a large block range, is a real resource-exhaustion vector this
+// node had no defense against.
+const maxConcurrentInboundSyncs = 8
+
 // P2P wraps a libp2p host and a GossipSub instance with the two l1chain topics
 // (blocks and txs) plus the chain-sync stream protocol. Blocks received over
 // the network are validated through node.AcceptExternalBlock before acceptance.
@@ -50,6 +60,12 @@ type P2P struct {
 	// block read loop, so one slow peer can neither stall block intake nor let
 	// syncs fan out without limit.
 	syncSem chan struct{}
+
+	// inboundSyncSem bounds concurrent SyncProtocol streams this node will
+	// SERVE (see maxConcurrentInboundSyncs). Separate from syncSem: that one
+	// bounds this node's own outbound requests, this one bounds its capacity
+	// to answer OTHER peers' requests -- two different resource pools.
+	inboundSyncSem chan struct{}
 }
 
 // NewP2P attaches a GossipSub router to h and joins the block and tx topics.
@@ -76,7 +92,14 @@ func NewP2P(ctx context.Context, h host.Host) (*P2P, error) {
 	if err != nil {
 		return nil, fmt.Errorf("p2p: join %s: %w", TxTopic, err)
 	}
-	return &P2P{host: h, ps: ps, block: bt, tx: tt, syncSem: make(chan struct{}, maxConcurrentSyncs)}, nil
+	return &P2P{
+		host:           h,
+		ps:             ps,
+		block:          bt,
+		tx:             tt,
+		syncSem:        make(chan struct{}, maxConcurrentSyncs),
+		inboundSyncSem: make(chan struct{}, maxConcurrentInboundSyncs),
+	}, nil
 }
 
 // blockTopicValidator is the GossipSub ValidatorEx for the block topic. It is a
