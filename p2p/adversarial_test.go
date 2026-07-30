@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -681,27 +682,42 @@ func TestAdvP2P09InboundSyncStreamFlood(t *testing.T) {
 	wg.Wait()
 	t.Logf("opened %d/%d flood streams", len(streams), floodCount)
 
-	// Give the honest side's handler goroutines a moment to run and the
-	// semaphore-rejected excess to be reset -- this is pure goroutine
-	// scheduling, no network round trip needed, so it should be fast and
-	// well under the 30s full stream timeout the WITHIN-cap streams are
-	// still waiting on.
-	const readDeadline = 500 * time.Millisecond
+	// Classify each stream by WHICH KIND of error Read returns, not by how
+	// fast it returns: a latency-window heuristic (e.g. "returned in under
+	// 250ms") is a race against CI scheduling jitter -- a loaded runner can
+	// delay the honest side's handler goroutine from even reaching its
+	// s.Reset() call past the window, misclassifying a genuinely-rejected
+	// stream as held-open. Checking the error type instead is exact: a
+	// stream the remote already Reset() returns some non-timeout error
+	// (often immediately, but the exact latency doesn't matter); a stream
+	// still genuinely held open by an accepted handler only ever returns
+	// once OUR OWN read deadline fires, which is always a net.Error with
+	// Timeout() true. All streams are checked concurrently so the total
+	// wall time is one readDeadline, not floodCount of them.
+	const readDeadline = 3 * time.Second
 	rejected := 0
+	var mu2 sync.Mutex
+	var wg2 sync.WaitGroup
 	for _, s := range streams {
-		start := time.Now()
-		_ = s.SetReadDeadline(time.Now().Add(readDeadline))
-		buf := make([]byte, 1)
-		_, _ = s.Read(buf)
-		// A read that returns quickly means the remote already closed the
-		// stream (the semaphore rejected it); a read that only returns once
-		// OUR OWN deadline fires means the remote is still genuinely
-		// holding it open, inside the cap.
-		if time.Since(start) < readDeadline/2 {
-			rejected++
-		}
-		_ = s.Reset()
+		wg2.Add(1)
+		go func(s network.Stream) {
+			defer wg2.Done()
+			_ = s.SetReadDeadline(time.Now().Add(readDeadline))
+			buf := make([]byte, 1)
+			_, err := s.Read(buf)
+			timedOut := false
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				timedOut = true
+			}
+			if !timedOut {
+				mu2.Lock()
+				rejected++
+				mu2.Unlock()
+			}
+			_ = s.Reset()
+		}(s)
 	}
+	wg2.Wait()
 	wantRejectedAtLeast := len(streams) - maxConcurrentInboundSyncs
 	t.Logf("%d/%d flood streams rejected (cap %d)", rejected, len(streams), maxConcurrentInboundSyncs)
 	if wantRejectedAtLeast > 0 && rejected < wantRejectedAtLeast {
