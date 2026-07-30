@@ -100,7 +100,7 @@ func NewChain(genesis core.Block, alloc ...map[core.Address]uint64) *Chain {
 
 // fundGenesis returns a fresh StateDB funded with the genesis allocation.
 func (c *Chain) fundGenesis() state.StateDB {
-	st := state.NewMemStateDB()
+	st := state.New()
 	for addr, bal := range c.genesisAlloc {
 		acct := st.GetAccount(addr)
 		acct.Balance += bal

@@ -14,7 +14,7 @@ const integDiff = 6
 
 // fundedFromAlloc returns a fresh state funded with the genesis allocation.
 func fundedFromAlloc(alloc map[core.Address]uint64) state.StateDB {
-	st := state.NewMemStateDB()
+	st := state.New()
 	for a, bal := range alloc {
 		acct := st.GetAccount(a)
 		acct.Balance += bal

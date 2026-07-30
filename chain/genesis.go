@@ -43,7 +43,7 @@ func ApplyGenesis(st state.StateDB, g Genesis) core.Block {
 	return b
 }
 
-// ToBlock builds the genesis block against a fresh in-memory StateDB.
+// ToBlock builds the genesis block against a fresh StateDB.
 func (g Genesis) ToBlock() core.Block {
-	return ApplyGenesis(state.NewMemStateDB(), g)
+	return ApplyGenesis(state.New(), g)
 }
