@@ -45,6 +45,7 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 | **M2** | Real libp2p P2P (gossipsub + stream sync), multiprocess/LAN 3-node convergence + partition re-convergence, React/Next block explorer with in-browser signing | ✅ done |
 | **M3** | Custom stack VM: gas metering, contract deploy/call, journaled storage, deterministic mining==validation | ✅ done |
 | **M4** | EVM compatibility (hybrid): B2 subset-from-scratch (M3) + B1 embedded go-ethereum `core/vm` running a real ERC-20 over keccak/MPT state | ✅ done |
+| **Exchange** | A deterministic limit order book inside the state transition, with a batch-auction matching mode and RPC/explorer exposure. See [On-chain exchange](#on-chain-exchange) below | ✅ done |
 
 ## Features
 
@@ -52,7 +53,8 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 - **Native coin** — account/balance model, ECDSA secp256k1 signatures, genesis allocation, fixed block reward (coinbase credited into canonical state), infinite supply.
 - **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps) against slow/malicious peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
 - **Smart contracts** — a from-scratch stack VM (M3) with Ethereum-numbered opcodes, gas, out-of-gas revert, and CALL depth limits; plus an embedded go-ethereum EVM (M4) that deploys and runs a standard ERC-20 with keccak-derived mapping storage.
-- **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`), a CLI (`wallet`/`balance`/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier).
+- **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`, `getOrderBookDepth`, `getOrderBook`, `getLastAuction`, `getExchangeBalance`), a CLI (`wallet`/`balance`/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier) plus a live `/exchange` order-book view.
+- **On-chain exchange** — a deterministic limit order book reachable through ordinary signed transactions, in either continuous or batch-auction matching mode. See below.
 
 ## Quickstart
 
@@ -96,7 +98,7 @@ NEXT_PUBLIC_RPC_URL=http://127.0.0.1:8545 npm run dev   # http://localhost:3000
 ```bash
 go vet ./...
 go test ./...          # 13 packages, unit + integration + determinism
-cd web && npx playwright test   # explorer + browser-signed send E2E
+cd web && npx playwright test   # explorer + browser-signed send + exchange order-book E2E
 ```
 
 Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](artifacts/):
@@ -111,6 +113,73 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - **Determinism is consensus-critical.** Mining and validation compute block state roots through the *identical* derivation path (replay from genesis, sorted map-free hashing, no wall-clock/randomness). Contract execution (M3) and the state root fold are deterministic so every node agrees.
 - **StateDB is an interface** (`state/StateDB`) so the M1 KV model can be swapped for a Merkle-Patricia-Trie without touching block validation, RPC, or the VM — the seam M4's EVM state uses.
 - **The EVM (M4) is an execution capability**, cleanly isolated from chain consensus (nothing imports `l1chain/evm`). Full opcode/precompile/MPT byte-for-byte chain-consensus equivalence is a documented long-term goal.
+
+## On-chain exchange
+
+A price-time-priority limit order book, matched *inside the state transition
+itself* rather than bolted on beside it — built on
+[`github.com/ITJHIT/onchain-orderbook`](https://github.com/ITJHIT/onchain-orderbook),
+a separate module that is deterministic by construction (no floating point, no
+map-iteration-order dependence, everything else consensus needs) and tested
+there against eight independent engines, a replay from genesis, and a
+demonstration of the map-iteration hazard it avoids. `exchange/` is the seam
+that makes that engine reachable from an ordinary chain, without either side
+having to know much about the other.
+
+- **An order is an ordinary signed transaction.** `exchange.Address` is a
+  reserved account the state transition routes to instead of the VM — the
+  same shape as a precompile. Nothing about signing, nonce ordering, the
+  mempool or gossip changes; the book inherits replay protection and
+  exact-nonce sequencing for free.
+- **Order identity is `(block height, index within block)`**, never a local
+  counter — the only source of IDs two validators agree on without
+  coordinating, and that a replay from genesis reproduces exactly. Getting
+  this right took a real bug fix: the state-transition helper that first
+  wired this in threaded the position through correctly, but neither of the
+  two functions the actual mining/validation path calls
+  (`Chain.AddBlock`'s `applyBlockRewarded`, `Chain.CandidateStateRoot`) did —
+  they still called the older, position-less `ApplyTx`. Every order minted on
+  a real chain would have collided on `OrderID{0,0}`, and `Cancel` would not
+  have been able to tell one user's resting order from another's. A
+  regression test drives the real `Chain.AddBlock`/`CandidateStateRoot` path
+  (not a lower-level helper) across multiple blocks specifically so this
+  class of bug cannot hide behind a single-block test again.
+- **Book state lives in the exchange account's own storage**, so `StateRoot`
+  folds it in automatically — it already sorts storage keys. A second root
+  for the book would have been a second thing that could disagree with the
+  first.
+- **The native coin is the quote asset.** A fill moves real chain balance,
+  not a parallel ledger that needs reconciling against it.
+- **Two matching modes, and the difference is the point.** `Continuous`
+  matches each order as it lands, so whoever is earlier in the block takes
+  the better price — on a chain, "earlier" is decided by whoever orders the
+  block, which is exactly the option a block producer can sell.
+  `BatchAuction` (`Chain.SetExchangeMode`, applied identically by mining and
+  validation, same as `ChainID`) clears every order in a block at one uniform
+  price instead, via `exchange.BatchSession`: every placement stays
+  unmatched until every other placement in the same block has also been
+  staged, so position stops mattering. Demonstrated, not just asserted: one
+  seller rests supply for exactly one of two competing buyers, and running
+  the identical three transactions with the two buyers swapped gives 10/0
+  under `Continuous` (whichever is earlier wins everything) and 5/5 under
+  `BatchAuction`, either order.
+- **Reachable over RPC and the explorer** — `getOrderBookDepth`,
+  `getOrderBook`, `getLastAuction`, `getExchangeBalance`, and a live
+  `/exchange` page in `web/` polling them, built the same way the rest of the
+  explorer is (see `lib/rpc.ts`, `lib/exchange.ts` for the client-side
+  calldata encoding that mirrors `exchange.go` exactly, the way `lib/sign.ts`
+  already mirrors transaction signing).
+- **Stated limit, not silently skipped:** genesis currently premines only
+  the native/quote side (`Genesis.Alloc`); there is no minting transaction
+  yet for the base asset, so a real crossing trade needs `exchange.CreditBase`
+  called directly on state — a genesis/test helper, not something a live
+  chain can do today. The batch-clear-and-settle mechanism itself is
+  verified directly against real balances (`exchange` package tests,
+  `chain/exchange_mev_test.go`); what is not yet exercised is that exact
+  path through a full `node.New` → mine → RPC round trip, because nothing
+  can fund the sell side of it yet. Genesis base-asset premine, parallel to
+  the existing native `Alloc` and threaded through the store's durable
+  round-trip the same way, would close this.
 
 ## Hardening (post-M4)
 
