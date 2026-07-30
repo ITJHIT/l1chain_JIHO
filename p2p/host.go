@@ -16,15 +16,45 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
+	coreconnmgr "github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	// The concrete BasicConnMgr implementation lives in p2p/net/connmgr, a
+	// DIFFERENT package from core/connmgr (which only declares the
+	// ConnManager interface libp2p.ConnectionManager expects) -- both are
+	// named "connmgr", hence the alias above on the interface import.
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 
 	ma "github.com/multiformats/go-multiaddr"
 )
+
+// Connection watermarks for the connection manager every host gets by
+// default (see NewHostWithConfig). Found missing entirely, not just
+// under-tuned: NewHost previously had no libp2p.ConnectionManager at all,
+// meaning no cap of any kind on inbound connections -- an attacker opening
+// many sybil connections to a victim (an eclipse attempt) had nothing to
+// push back against short of the OS's own file-descriptor limit. connLow is
+// the floor libp2p will never trim below even under pressure (small on
+// purpose -- this node's own real workload rarely needs more than a
+// handful of peers); connHigh is where trimming of the least useful
+// connections begins.
+const (
+	connLow  = 20
+	connHigh = 100
+)
+
+func newConnManager() (coreconnmgr.ConnManager, error) {
+	cm, err := connmgr.NewConnManager(connLow, connHigh, connmgr.WithGracePeriod(10*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("p2p: connection manager: %w", err)
+	}
+	return cm, nil
+}
 
 // NewHost builds a real libp2p host listening on 127.0.0.1 over TCP with a
 // freshly generated Ed25519 identity. Pass listenPort 0 to bind an ephemeral
@@ -71,9 +101,14 @@ func NewHostWithConfig(ctx context.Context, cfg HostConfig) (host.Host, error) {
 			return nil, fmt.Errorf("p2p: generate identity: %w", err)
 		}
 	}
+	cm, err := newConnManager()
+	if err != nil {
+		return nil, err
+	}
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/%d", listenHost, cfg.ListenPort)),
+		libp2p.ConnectionManager(cm),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("p2p: new host: %w", err)

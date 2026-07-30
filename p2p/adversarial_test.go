@@ -15,6 +15,8 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"errors"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -533,5 +535,217 @@ func TestAdvP2P07JunkTopicPayload(t *testing.T) {
 		func() { floodBlock(ctx, pa, validBytes, 1) },
 		time.Now().Add(30*time.Second)) {
 		t.Fatalf("block read loop died after junk: valid block not accepted")
+	}
+}
+
+// --- Case 8: eclipse attempt -- many sybil peer connections -----------------
+//
+// Genuinely new ground, not overlapping cases 1-7: those all use exactly one
+// attacker peer connected to one honest node. Before this session, p2p/host.go
+// had no libp2p.ConnectionManager, ConnectionGater, or peer-scoring
+// configured at all -- libp2p's own default is UNBOUNDED inbound
+// connections, so an attacker surrounding a victim with many sybil
+// identities (dominating its connection slots / GossipSub mesh, the actual
+// eclipse-attack mechanism) had no defense to run into. NewHost now attaches
+// a real connmgr.BasicConnMgr (connLow/connHigh in host.go); this proves it
+// actually bounds the connection count and that the node stays functional
+// -- specifically, still able to reach a genuine peer -- afterward.
+
+func TestAdvP2P08EclipseAttemptManySybilPeers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	faucet, err := wallet.NewKey()
+	if err != nil {
+		t.Fatalf("faucet: %v", err)
+	}
+	fa := faucet.Address()
+
+	honest := newNetNode(t, fa)
+	hh, ph := startPeer(t, ctx, honest)
+
+	// Each sybil is a DISTINCT libp2p identity dialing the honest host --
+	// the actual shape of an eclipse attempt. One attacker reconnecting many
+	// times would not exercise this: libp2p dedupes connections by peer ID,
+	// so that is just one connection, not many.
+	const sybilCount = connHigh + 40
+	for i := 0; i < sybilCount; i++ {
+		sh, err := NewHost(ctx, 0)
+		if err != nil {
+			t.Fatalf("sybil host %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = sh.Close() })
+		if err := Connect(ctx, sh, hh); err != nil {
+			// A dial racing the connection manager's own trimming can
+			// legitimately fail once the honest side is already at
+			// capacity -- that is the defense working, not a test failure.
+			continue
+		}
+	}
+
+	// The connection manager trims down toward its high watermark on its
+	// own background schedule (a silence period, ~10s by default, plus a
+	// grace period before any single connection becomes eligible) -- poll
+	// rather than assert immediately.
+	deadline := time.Now().Add(90 * time.Second)
+	var finalConns int
+	for {
+		finalConns = len(hh.Network().Conns())
+		if finalConns <= connHigh {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("connection count never came down to the high watermark: %d connections (limit %d) after %d sybil attempts",
+				finalConns, connHigh, sybilCount)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Logf("connections bounded at %d (limit %d) after %d sybil attempts", finalConns, connHigh, sybilCount)
+
+	// Liveness: the honest node must still be able to reach and converge
+	// with a genuinely honest peer after the attempted eclipse -- not just
+	// "still running", but still able to do the one thing an eclipse
+	// attack is specifically meant to deny.
+	friend := newNetNode(t, fa)
+	fh, pf := startPeer(t, ctx, friend)
+	if err := Connect(ctx, hh, fh); err != nil {
+		t.Fatalf("connect honest<->friend after eclipse attempt: %v", err)
+	}
+	waitMeshPeers(t, ph, 1, time.Now().Add(20*time.Second))
+	waitMeshPeers(t, pf, 1, time.Now().Add(20*time.Second))
+
+	blk, err := friend.MineBlock()
+	if err != nil {
+		t.Fatalf("friend mine: %v", err)
+	}
+	blkBytes, err := store.EncodeBlock(blk)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !pollConverged(blk, []*node.Node{honest},
+		func() { floodBlock(ctx, pf, blkBytes, 1) },
+		time.Now().Add(30*time.Second)) {
+		t.Fatalf("honest node did not converge with a genuine peer after the eclipse attempt (height=%d)", honest.Head().Header.Height)
+	}
+}
+
+// --- Case 9: inbound sync-stream flood --------------------------------------
+//
+// p2p/sync.go's maxConcurrentSyncs only ever bounded this node's own
+// OUTBOUND catch-up requests; nothing capped how many peers could
+// simultaneously open an inbound SyncProtocol stream against this node as
+// RESPONDER. This proves the fix (inboundSyncSem) actually rejects excess
+// concurrent streams rather than accepting all of them: many sybil peers
+// each open a stream and hold it open (never sending the 8-byte start
+// height the responder is waiting to read, never closing it) -- streams the
+// cap rejects should be closed by the honest side almost immediately
+// (fast read-return, well under our own read deadline); streams within the
+// cap stay genuinely open (read only returns once OUR deadline expires).
+func TestAdvP2P09InboundSyncStreamFlood(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	faucet, err := wallet.NewKey()
+	if err != nil {
+		t.Fatalf("faucet: %v", err)
+	}
+	fa := faucet.Address()
+
+	honest := newNetNode(t, fa)
+	hh, ph := startPeer(t, ctx, honest)
+
+	const floodCount = maxConcurrentInboundSyncs * 5
+	var mu sync.Mutex
+	streams := make([]network.Stream, 0, floodCount)
+	var wg sync.WaitGroup
+	for i := 0; i < floodCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sh, err := NewHost(ctx, 0)
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = sh.Close() })
+			if err := Connect(ctx, sh, hh); err != nil {
+				return
+			}
+			s, err := sh.NewStream(ctx, hh.ID(), SyncProtocol)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			streams = append(streams, s)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	t.Logf("opened %d/%d flood streams", len(streams), floodCount)
+
+	// Classify each stream by WHICH KIND of error Read returns, not by how
+	// fast it returns: a latency-window heuristic (e.g. "returned in under
+	// 250ms") is a race against CI scheduling jitter -- a loaded runner can
+	// delay the honest side's handler goroutine from even reaching its
+	// s.Reset() call past the window, misclassifying a genuinely-rejected
+	// stream as held-open. Checking the error type instead is exact: a
+	// stream the remote already Reset() returns some non-timeout error
+	// (often immediately, but the exact latency doesn't matter); a stream
+	// still genuinely held open by an accepted handler only ever returns
+	// once OUR OWN read deadline fires, which is always a net.Error with
+	// Timeout() true. All streams are checked concurrently so the total
+	// wall time is one readDeadline, not floodCount of them.
+	const readDeadline = 3 * time.Second
+	rejected := 0
+	var mu2 sync.Mutex
+	var wg2 sync.WaitGroup
+	for _, s := range streams {
+		wg2.Add(1)
+		go func(s network.Stream) {
+			defer wg2.Done()
+			_ = s.SetReadDeadline(time.Now().Add(readDeadline))
+			buf := make([]byte, 1)
+			_, err := s.Read(buf)
+			timedOut := false
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				timedOut = true
+			}
+			if !timedOut {
+				mu2.Lock()
+				rejected++
+				mu2.Unlock()
+			}
+			_ = s.Reset()
+		}(s)
+	}
+	wg2.Wait()
+	wantRejectedAtLeast := len(streams) - maxConcurrentInboundSyncs
+	t.Logf("%d/%d flood streams rejected (cap %d)", rejected, len(streams), maxConcurrentInboundSyncs)
+	if wantRejectedAtLeast > 0 && rejected < wantRejectedAtLeast {
+		t.Fatalf("expected at least %d of %d flood streams to be rejected by the inbound sync cap (%d), got %d",
+			wantRejectedAtLeast, len(streams), maxConcurrentInboundSyncs, rejected)
+	}
+
+	// Liveness: the honest node still meshes with and converges from a
+	// genuinely new peer while the flood is ongoing.
+	friend := newNetNode(t, fa)
+	fh, pf := startPeer(t, ctx, friend)
+	if err := Connect(ctx, hh, fh); err != nil {
+		t.Fatalf("connect honest<->friend during flood: %v", err)
+	}
+	waitMeshPeers(t, ph, 1, time.Now().Add(20*time.Second))
+	waitMeshPeers(t, pf, 1, time.Now().Add(20*time.Second))
+
+	fblk, err := friend.MineBlock()
+	if err != nil {
+		t.Fatalf("friend mine: %v", err)
+	}
+	fblkBytes, err := store.EncodeBlock(fblk)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !pollConverged(fblk, []*node.Node{honest},
+		func() { floodBlock(ctx, pf, fblkBytes, 1) },
+		time.Now().Add(30*time.Second)) {
+		t.Fatalf("honest node did not converge with a new peer during the inbound sync flood (height=%d)", honest.Head().Header.Height)
 	}
 }

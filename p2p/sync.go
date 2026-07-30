@@ -46,6 +46,18 @@ func (p *P2P) registerSyncHandler(n *node.Node) {
 	p.host.SetStreamHandler(SyncProtocol, func(s network.Stream) {
 		defer func() { _ = s.Close() }()
 
+		// Bound how many of these this node will serve at once (see
+		// maxConcurrentInboundSyncs) -- reject outright rather than queue
+		// unboundedly if every slot is already busy, the same "cap, don't
+		// queue" choice syncSem already makes for outbound requests.
+		select {
+		case p.inboundSyncSem <- struct{}{}:
+			defer func() { <-p.inboundSyncSem }()
+		default:
+			_ = s.Reset()
+			return
+		}
+
 		// Bound the whole responder exchange so a slow/silent requester cannot
 		// pin the handler open.
 		_ = s.SetDeadline(time.Now().Add(syncStreamTimeout))

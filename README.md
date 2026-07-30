@@ -133,6 +133,7 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - `m2-p2p-redteam-report.json` — invalid/forged/tampered gossip, malicious sync responder, replay flood, orphan, junk payload
 - `m3-vm-redteam-report.json` — infinite loop OOG, stack under/overflow, invalid jumps, storage isolation, reentrancy bounds, determinism
 - `m4-evm-redteam-report.json` — OOG deploy/call, revert integrity, gas-bounded loops, reentrancy, deterministic MPT root
+- `m5-p2p-hardening-redteam-report.json` — eclipse attempt (many sybil peer connections, bounded by a real libp2p connection manager), inbound sync-stream flood (bounded by a per-node concurrency cap), liveness preserved under both
 
 ## Design notes
 
