@@ -70,6 +70,19 @@ func (s *simnetSourceIPSelector) PreferredSourceIPForDestination(_ *net.UDPAddr)
 // simnet.NewSimConn-backed net.PacketConn into QUIC's own connection
 // manager, so all of this host's QUIC traffic actually flows through
 // router's simulated firewall/NAT instead of a real socket.
+//
+// Deviates from go-libp2p's own holepunch_test.go here: that file's
+// quicSimnet never calls SetUpPacketReceiver, because go-libp2p v0.48.0's
+// go.mod pins marcopolo/simnet at an older v0.0.4. This repo's go.sum
+// resolves the same dependency to v0.0.7 (a newer transitive requirement
+// elsewhere in the module graph forces the higher version via MVS), and
+// v0.0.7's SimConn.WriteTo panics if SetUpPacketReceiver was never called
+// -- confirmed directly against v0.0.7's own vendored source
+// (simconn.go:260-263) after CI caught the panic on the first push.
+// router itself satisfies PacketReceiver (SimpleFirewallRouter.RecvPacket),
+// so wiring WriteTo's outbound packets to router.RecvPacket is the correct
+// "send up to the router for delivery" half of the same AddNode-registered
+// "receive down from the router" wiring already below.
 func quicSimnetTransport(isPubliclyReachable bool, router *simnet.SimpleFirewallRouter) libp2p.Option {
 	sel := &simnetSourceIPSelector{}
 	return libp2p.QUICReuse(
@@ -83,6 +96,7 @@ func quicSimnetTransport(isPubliclyReachable bool, router *simnet.SimpleFirewall
 				router.SetAddrPubliclyReachable(address)
 			}
 			c := simnet.NewSimConn(address)
+			c.SetUpPacketReceiver(router)
 			router.AddNode(address, c)
 			return c, nil
 		}),
