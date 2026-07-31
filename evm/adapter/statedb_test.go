@@ -85,7 +85,12 @@ func TestNonceRoundTrip(t *testing.T) {
 }
 
 func TestCodeRoundTripUsesL1ChainHashConvention(t *testing.T) {
-	s := New(state.NewMemStateDB())
+	// state.New() (the real MPT), not state.NewMemStateDB(): memStateDB's
+	// own SetCode deliberately never wires CodeHash (state/mpt.go's SetCode
+	// doc comment calls it "a dead field" there) -- only the production MPT
+	// implementation actually derives it via core.SumHash, so that's the
+	// only backing store this specific assertion is meaningful against.
+	s := New(state.New())
 	code := []byte{0x60, 0x01, 0x60, 0x02, 0x01} // PUSH1 1 PUSH1 2 ADD -- arbitrary real-looking bytecode
 
 	if got := s.GetCodeHash(addrA); got != (common.Hash{}) {
