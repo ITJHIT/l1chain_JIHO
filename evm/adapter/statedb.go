@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -48,6 +50,24 @@ type StateDB struct {
 	touched        map[core.Address]bool
 	selfDestructed map[core.Address]bool
 	newContracts   map[core.Address]bool
+
+	// warmAddrs/warmSlots (EIP-2929/2930 access lists) and transient
+	// (EIP-1153 transient storage) are reset wholesale by Prepare, exactly
+	// once per transaction -- mirroring go-ethereum's own StateDB.Prepare,
+	// which replaces s.accessList/s.transientStorage outright rather than
+	// incrementally merging into whatever was there before. Individual
+	// AddAddressToAccessList/AddSlotToAccessList/SetTransientState calls
+	// AFTER that reset are journaled as usual.
+	warmAddrs map[core.Address]bool
+	warmSlots map[addrSlot]bool
+	transient map[addrSlot]core.Hash
+}
+
+// addrSlot is the composite (address, storage key) key access-list slot
+// tracking and transient storage share.
+type addrSlot struct {
+	addr core.Address
+	slot core.Hash
 }
 
 // touch marks addr as existing for the lifetime of this StateDB instance
@@ -334,6 +354,111 @@ func (s *StateDB) SelfDestruct(addr common.Address) {
 	s.selfDestructed[a] = true
 	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
 		delete(s.selfDestructed, a)
+	})
+}
+
+// --- Access lists (EIP-2929/2930) and transient storage (EIP-1153) ------
+
+// addWarmAddr journals warming addr, if it wasn't already warm. Returns
+// whether it actually changed anything -- AddSlotToAccessList needs this to
+// decide whether the address itself also needs its own journal entry,
+// mirroring go-ethereum's own AddAddressToAccessList/AddSlotToAccessList.
+func (s *StateDB) addWarmAddr(a core.Address) bool {
+	if s.warmAddrs[a] {
+		return false
+	}
+	if s.warmAddrs == nil {
+		s.warmAddrs = make(map[core.Address]bool)
+	}
+	s.warmAddrs[a] = true
+	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
+		delete(s.warmAddrs, a)
+	})
+	return true
+}
+
+func (s *StateDB) AddAddressToAccessList(addr common.Address) {
+	s.addWarmAddr(toCoreAddress(addr))
+}
+
+func (s *StateDB) AddSlotToAccessList(addr common.Address, slot common.Hash) {
+	a := toCoreAddress(addr)
+	s.addWarmAddr(a)
+	key := addrSlot{addr: a, slot: toCoreHash(slot)}
+	if s.warmSlots[key] {
+		return
+	}
+	if s.warmSlots == nil {
+		s.warmSlots = make(map[addrSlot]bool)
+	}
+	s.warmSlots[key] = true
+	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
+		delete(s.warmSlots, key)
+	})
+}
+
+func (s *StateDB) AddressInAccessList(addr common.Address) bool {
+	return s.warmAddrs[toCoreAddress(addr)]
+}
+
+func (s *StateDB) SlotInAccessList(addr common.Address, slot common.Hash) (addressOk bool, slotOk bool) {
+	a := toCoreAddress(addr)
+	return s.warmAddrs[a], s.warmSlots[addrSlot{addr: a, slot: toCoreHash(slot)}]
+}
+
+// Prepare resets and re-warms the access list and clears transient storage
+// for a new transaction -- mirroring go-ethereum's own Prepare exactly,
+// including that this reset itself is NOT journaled (Prepare always runs
+// before the first Snapshot of a transaction, so there is nothing before it
+// a revert could ever need to restore).
+func (s *StateDB) Prepare(rules params.Rules, sender, coinbase common.Address, dst *common.Address, precompiles []common.Address, list types.AccessList) {
+	if rules.IsEIP2929 {
+		s.warmAddrs = make(map[core.Address]bool)
+		s.warmSlots = make(map[addrSlot]bool)
+
+		s.warmAddrs[toCoreAddress(sender)] = true
+		if dst != nil {
+			s.warmAddrs[toCoreAddress(*dst)] = true
+		}
+		for _, addr := range precompiles {
+			s.warmAddrs[toCoreAddress(addr)] = true
+		}
+		for _, el := range list {
+			a := toCoreAddress(el.Address)
+			s.warmAddrs[a] = true
+			for _, key := range el.StorageKeys {
+				s.warmSlots[addrSlot{addr: a, slot: toCoreHash(key)}] = true
+			}
+		}
+		if rules.IsShanghai { // EIP-3651: warm coinbase
+			s.warmAddrs[toCoreAddress(coinbase)] = true
+		}
+	}
+	s.transient = make(map[addrSlot]core.Hash)
+}
+
+func (s *StateDB) GetTransientState(addr common.Address, key common.Hash) common.Hash {
+	return toCommonHash(s.transient[addrSlot{addr: toCoreAddress(addr), slot: toCoreHash(key)}])
+}
+
+// SetTransientState no-ops on a value that wouldn't actually change,
+// mirroring go-ethereum's own SetTransientState exactly (unlike
+// SetNonce/AddBalance/SubBalance, which always touch even on a no-op --
+// transient storage carries no existence/EIP-161 semantics, so there is
+// nothing else a no-op write needs to trigger here).
+func (s *StateDB) SetTransientState(addr common.Address, key, value common.Hash) {
+	as := addrSlot{addr: toCoreAddress(addr), slot: toCoreHash(key)}
+	v := toCoreHash(value)
+	prev := s.transient[as]
+	if prev == v {
+		return
+	}
+	if s.transient == nil {
+		s.transient = make(map[addrSlot]core.Hash)
+	}
+	s.transient[as] = v
+	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
+		s.transient[as] = prev
 	})
 }
 
