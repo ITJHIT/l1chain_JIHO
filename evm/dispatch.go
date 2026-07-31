@@ -2,7 +2,6 @@ package evm
 
 import (
 	"bytes"
-	"encoding/binary"
 
 	"l1chain/core"
 )
@@ -48,29 +47,4 @@ func UntagCode(code []byte) []byte {
 		return code
 	}
 	return code[len(codeMagic):]
-}
-
-// evmCreatePreimagePrefix domain-separates DeriveContractAddress from
-// vm.CreateAddress's own SumHash(From||Nonce) scheme (vm/stackvm.go) --
-// prepending a fixed string that never appears in M3's own preimage makes
-// the two address spaces unable to collide by construction, not merely by
-// being statistically unlikely to.
-const evmCreatePreimagePrefix = "l1chain-evm-create"
-
-// DeriveContractAddress computes the address a real EVM contract deployed
-// by from at nonce nonce will live at: the last 20 bytes of
-// SumHash(evmCreatePreimagePrefix || from || nonce), mirroring
-// vm.CreateAddress's own big-endian-nonce, last-20-bytes convention exactly
-// except for the domain-separating prefix.
-func DeriveContractAddress(from core.Address, nonce uint64) core.Address {
-	buf := make([]byte, 0, len(evmCreatePreimagePrefix)+core.AddrLen+8)
-	buf = append(buf, evmCreatePreimagePrefix...)
-	buf = append(buf, from[:]...)
-	var n [8]byte
-	binary.BigEndian.PutUint64(n[:], nonce)
-	buf = append(buf, n[:]...)
-	h := core.SumHash(buf)
-	var addr core.Address
-	copy(addr[:], h[core.HashLen-core.AddrLen:])
-	return addr
 }
