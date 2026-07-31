@@ -11,14 +11,21 @@ package chain
 
 import (
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/state"
 )
 
 // Genesis describes the initial allocation and PoW parameters of a chain.
 type Genesis struct {
-	Alloc      map[core.Address]uint64 // address -> starting balance
-	Difficulty uint32                  // difficulty carried in the genesis header
-	Timestamp  int64                   // genesis header timestamp
+	Alloc      map[core.Address]uint64 // address -> starting native/quote balance
+	// BaseAlloc credits the exchange's base asset at genesis, parallel to Alloc.
+	// It is the only mint path a real chain can reach: exchange.CreditBase is
+	// otherwise only ever called by tests against a hand-built StateDB, never
+	// through Genesis/Chain, so no real crossing trade has ever had a funded
+	// sell side (see rpc/exchange_crossing_e2e_test.go for the closed gap).
+	BaseAlloc  map[core.Address]uint64
+	Difficulty uint32 // difficulty carried in the genesis header
+	Timestamp  int64  // genesis header timestamp
 }
 
 // ApplyGenesis funds the alloc accounts into st and returns the genesis block
@@ -29,6 +36,9 @@ func ApplyGenesis(st state.StateDB, g Genesis) core.Block {
 		acct := st.GetAccount(addr)
 		acct.Balance += bal
 		st.SetAccount(addr, acct)
+	}
+	for addr, amt := range g.BaseAlloc {
+		exchange.CreditBase(st, addr, amt)
 	}
 	st.Commit()
 

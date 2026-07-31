@@ -44,8 +44,9 @@ type Chain struct {
 	blocks map[core.Hash]core.Block
 	td     map[core.Hash]uint64 // cumulative difficulty per block hash
 
-	genesisHash  core.Hash
-	genesisAlloc map[core.Address]uint64
+	genesisHash      core.Hash
+	genesisAlloc     map[core.Address]uint64
+	genesisBaseAlloc map[core.Address]uint64
 
 	head        core.Hash
 	headState   state.StateDB
@@ -77,16 +78,35 @@ func (c *Chain) ExchangeMode() exchange.Mode { return c.exchangeMode }
 // the engine to reproduce genesis balances when replaying state. Callers that
 // used a funded genesis MUST pass the same alloc so State() and StateRoot
 // validation are correct.
+//
+// NewChain never carries a base-asset allocation (see Genesis.BaseAlloc) --
+// callers that funded genesis with one MUST use NewChainWithAlloc instead, or
+// every replay (mining and validation alike) will fund a state that disagrees
+// with the genesis block's own baked StateRoot.
 func NewChain(genesis core.Block, alloc ...map[core.Address]uint64) *Chain {
+	var a map[core.Address]uint64
+	if len(alloc) > 0 {
+		a = alloc[0]
+	}
+	return NewChainWithAlloc(genesis, a, nil)
+}
+
+// NewChainWithAlloc is NewChain with an explicit base-asset genesis allocation
+// (credited via exchange.CreditBase, same as Genesis.BaseAlloc/ApplyGenesis)
+// alongside the existing native/quote alloc. A setter-after-construction
+// approach (the SetExchangeMode/SetChainID pattern) does not work here:
+// NewChain funds headState via fundGenesis() before returning, so a setter
+// would run too late -- the genesis block's already-baked StateRoot would
+// already disagree with headState's root by the time it ran.
+func NewChainWithAlloc(genesis core.Block, alloc, baseAlloc map[core.Address]uint64) *Chain {
 	c := &Chain{
 		blocks:      make(map[core.Hash]core.Block),
 		td:          make(map[core.Hash]uint64),
 		heightIndex: make(map[uint64]core.Hash),
 		chainID:     DefaultChainID,
 	}
-	if len(alloc) > 0 {
-		c.genesisAlloc = alloc[0]
-	}
+	c.genesisAlloc = alloc
+	c.genesisBaseAlloc = baseAlloc
 
 	gh := genesis.Hash()
 	c.genesisHash = gh
@@ -105,6 +125,9 @@ func (c *Chain) fundGenesis() state.StateDB {
 		acct := st.GetAccount(addr)
 		acct.Balance += bal
 		st.SetAccount(addr, acct)
+	}
+	for addr, amt := range c.genesisBaseAlloc {
+		exchange.CreditBase(st, addr, amt)
 	}
 	return st
 }
