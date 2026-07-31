@@ -8,49 +8,16 @@ import (
 
 	gethcore "github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/common"
-	gethstate "github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/stateless"
-	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
-// fullStateDB is a TEST-ONLY wrapper satisfying the complete vm.StateDB
-// interface early, by embedding this package's real, in-progress *StateDB
-// (promoting every method already implemented -- SelfDestruct,
-// IsNewContract, AddBalance, SubBalance, Snapshot/RevertToSnapshot,
-// transient storage/access lists/Prepare (PR3), etc.) and stubbing only
-// what PR4 hasn't built yet: GetStateAndCommittedState/GetState/SetState
-// (contract storage itself -- not needed by anything wired through this
-// wrapper so far) and logs/witness/Finalise/SetTxContext.
-//
-// This exists so tests in this package can drive a real vm.EVM through
-// real, unexported opcodes now -- proving each new piece is wire-compatible
-// with the actual opcode call patterns, rather than discovering a mismatch
-// only once *StateDB reaches full conformance in PR4 (at which point this
-// wrapper is deleted and these tests can drive *StateDB directly).
-type fullStateDB struct {
-	*StateDB
-}
-
-func (fullStateDB) GetStateAndCommittedState(common.Address, common.Hash) (common.Hash, common.Hash) {
-	return common.Hash{}, common.Hash{}
-}
-func (fullStateDB) GetState(common.Address, common.Hash) common.Hash { return common.Hash{} }
-func (fullStateDB) SetState(common.Address, common.Hash, common.Hash) common.Hash {
-	return common.Hash{}
-}
-func (fullStateDB) AddLog(*types.Log)                              {}
-func (fullStateDB) LogsForBurnAccounts() []*types.Log               { return nil }
-func (fullStateDB) AddPreimage(common.Hash, []byte)                 {}
-func (fullStateDB) Witness() *stateless.Witness                     { return nil }
-func (fullStateDB) AccessEvents() *gethstate.AccessEvents            { return nil }
-func (fullStateDB) Finalise(bool) *bal.ConstructionBlockAccessList { return nil }
-func (fullStateDB) SetTxContext(common.Hash, int, uint32)           {}
-
-var _ vm.StateDB = fullStateDB{}
+// *StateDB reaches full vm.StateDB conformance as of PR4 (statedb.go's own
+// `var _ vm.StateDB = (*StateDB)(nil)`), so the fullStateDB test-only
+// wrapper this file used through PR2/PR3 -- which embedded *StateDB and
+// stubbed whatever wasn't implemented yet -- is gone; every test below now
+// drives *StateDB directly.
 
 func newTestEVM(sdb vm.StateDB, cfg *params.ChainConfig) *vm.EVM {
 	blockCtx := vm.BlockContext{
@@ -189,7 +156,7 @@ const (
 // SubBalance/SelfDestruct, actually marking the contract destroyed.
 func TestSelfDestruct6780SameTxActuallyDestructs(t *testing.T) {
 	cfg := modernChainConfig()
-	sdb := fullStateDB{New(state.NewMemStateDB())}
+	sdb := New(state.NewMemStateDB())
 	deployer := common.HexToAddress("0xd000000000000000000000000000000000000d")
 	beneficiary := common.HexToAddress("0xbe0000000000000000000000000000000000be")
 
@@ -226,7 +193,7 @@ func TestSelfDestruct6780PriorTxOnlyTransfersBalance(t *testing.T) {
 
 	// First "transaction": deploy a contract whose RUNTIME code (not its
 	// constructor) self-destructs when called.
-	deploySDB := fullStateDB{New(base)}
+	deploySDB := New(base)
 	deploySDB.AddBalance(deployer, u256(1_000_000), 0)
 	runtime := selfdestructBytecode(beneficiary)
 	contractAddr := deployVia(t, deploySDB, cfg, deployer, deployingInitCode(runtime), new(uint256.Int), sdDeployGas)
@@ -243,7 +210,7 @@ func TestSelfDestruct6780PriorTxOnlyTransfersBalance(t *testing.T) {
 	// construction, exactly like a fresh per-tx adapter instance would be
 	// in production once a contract survives past the transaction that
 	// created it.
-	callSDB := fullStateDB{New(base)}
+	callSDB := New(base)
 	if callSDB.IsNewContract(contractAddr) {
 		t.Fatal("IsNewContract on a fresh StateDB instance = true, want false (this instance never created it)")
 	}

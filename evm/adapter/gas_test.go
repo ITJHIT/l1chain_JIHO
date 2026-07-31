@@ -38,12 +38,12 @@ func TestColdVsWarmSLOADGasDiffers(t *testing.T) {
 
 	// Both calls below are zero-value, so CanTransfer is never consulted --
 	// deployer needs no balance.
-	sdbA := fullStateDB{New(base)}
+	sdbA := New(base)
 	addrOne := common.HexToAddress("0x1111111111111111111111111111111111111a")
 	sdbA.SetCode(addrOne, oneSload, 0)
 	gasOne := callVia(t, sdbA, cfg, deployer, addrOne, sdCallGas)
 
-	sdbB := fullStateDB{New(base)}
+	sdbB := New(base)
 	addrTwo := common.HexToAddress("0x1111111111111111111111111111111111111b")
 	sdbB.SetCode(addrTwo, twoSload, 0)
 	gasTwo := callVia(t, sdbB, cfg, deployer, addrTwo, sdCallGas)
