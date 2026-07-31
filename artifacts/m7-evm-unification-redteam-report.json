@@ -1,0 +1,112 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M7",
+  "title": "M7 EVM/MPT unification -- regression sweep + wired-consensus-path adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-08-01",
+  "lane": "executor-qa-red-team (21-M4RedTeam lineage, extended to the real production consensus path)",
+  "target": "chain.ApplyTxAt / Chain.AddBlock / Chain.CandidateStateRoot via evm_wiring.go's applyEVMTx -- the real embedded go-ethereum v1.17.4 vm.EVM executing through evm/adapter.StateDB against l1chain's own canonical SHA-256 MPT state, wired into consensus in PR #32 (#28-#32, M7 milestone). Distinct from M4 (evm/adversarial_test.go) and M6 (evm/oz_adversarial_test.go), both of which only ever drive the standalone evm/runtime.go Harness -- a real vm.EVM disconnected from l1chain's own chain state. This report is the first adversarial coverage of the real path a node actually executes at.",
+  "test_packages": ["l1chain/chain"],
+  "test_files": ["chain/evm_wiring_adversarial_test.go", "chain/evm_wiring.go", "chain/evm_wiring_test.go", "chain/mpt_determinism_test.go"],
+  "production_code_modified": false,
+  "principle": "Same four invariant categories M4 established (out-of-gas, revert integrity, reentrancy bound, deterministic root), now proven at the wired-consensus level instead of the standalone Harness: every case drives a real transaction through chain.ApplyTxAt/Chain.AddBlock (the same entrypoints Chain.CandidateStateRoot and a real miner use), asserting the block is accepted (an OOG or REVERTed EVM execution is never itself a block-validation error -- only the up-front affordability check can reject a tx outright, per applyEVMTx's own doc comment), that a reverted call's storage write genuinely does not survive (real Snapshot/RevertToSnapshot exercised through the production adapter, not just evm/adapter's own isolated unit tests), that self-reentrancy terminates in bounded, non-hanging, non-panicking fashion, and -- case 4 -- that the full adversarial sequence combined produces an IDENTICAL state root on a second, fully independent Chain instance that only ever validates via AddBlock and never calls CandidateStateRoot itself, mirroring TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock's own two-chain shape (PR #32). The regression-sweep half of this milestone's PR7 scope (chain/contract_test.go, redteam/adversarial_test.go, vm/adversarial_test.go byte-for-byte unaffected by the new EVM dispatch path) is proven by the SAME go_test_all_summary run below that proves the new adversarial cases -- both draw from one real `go test -count=1 ./...` CI run, not a separate claim.",
+  "new_test_names": [
+    "TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas",
+    "TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged",
+    "TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic",
+    "TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-1",
+      "test": "TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas",
+      "scenario": "Deploy the real solc-compiled L1Token (contracts/L1Token.sol, frozen in evm/oz_erc20_fixture.go) creation bytecode through evm.DeployAddress on a real mined+AddBlock-accepted chain block, with a gas limit (1,000) far too small for real ERC20 construction to complete.",
+      "expected": "AddBlock accepts the block (an out-of-gas EVM deploy is not a block-validation error); no code exists at the derived contract address (no partial deployment survives); the sender's nonce advances by exactly 1; the sender's balance is debited by exactly the full gas reservation (no refund on OOG, matching the standalone Harness's own case-1/case-4 OOG behavior in M4).",
+      "verdict": "passed",
+      "receipt_evidence": "CI run https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30652132085 job 91227690529 (temporary verbose step, reverted after): '=== RUN   TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas' / '--- PASS: TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas (0.00s)'."
+    },
+    {
+      "id": "case-2",
+      "test": "TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged",
+      "scenario": "Deploy a minimal contract whose runtime unconditionally SSTOREs slot0=1 THEN REVERTs, then call it through a real chain block.",
+      "expected": "AddBlock accepts both blocks (a REVERTed EVM call is not a block-validation error); slot0 remains the zero hash after the call (the storage write does not survive the revert -- real Snapshot/RevertToSnapshot exercised through the production adapter wired in PR #32, not just evm/adapter's own isolated tests); the sender's nonce advances by exactly 1 for the call (2 total, deploy+call); gas is charged but strictly less than the call's own gas limit (a REVERT, unlike OOG, only burns gas actually consumed before the REVERT opcode fires, then refunds the rest).",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged' / '--- PASS: TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged (0.00s)'."
+    },
+    {
+      "id": "case-3",
+      "test": "TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic",
+      "scenario": "Deploy a contract whose runtime CALLs its own address forwarding all remaining gas, with no base case (identical shape to M4's own TestAdvEVM06RecursionBoundedByDepthAndGas runtime), then call it through a real chain block with a tight 200,000 gas budget.",
+      "expected": "The 1024 call-depth cap and EIP-150's 63/64 gas-forwarding rule bound the reentrancy exactly as they do in the standalone Harness -- AddBlock accepts the block, the CI job does not hang or crash (reaching the assertions at all is itself part of the proof, the same standard M4's own case-6 uses), the sender's nonce advances by exactly 1 for the call, and gas charged is bounded by (never exceeds) the call's own limit.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic' / '--- PASS: TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic (0.00s)'."
+    },
+    {
+      "id": "case-4",
+      "test": "TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains",
+      "scenario": "Cases 1-3 combined into one multi-block sequence (OOG deploy, revert-on-call deploy + self-reentrant deploy, then both called plus an ordinary plain transfer interleaved), mined on chainA via CandidateStateRoot+PoW (the exact path a real miner takes) and validated on chainB -- a fully independent *Chain instance constructed from the same genesis -- purely via AddBlock; chainB never calls CandidateStateRoot itself, mirroring PR #32's own TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock shape.",
+      "expected": "chainB accepts every one of chainA's mined blocks; StateRoot() agrees between the two fully independent instances after every block; final state on BOTH chains shows no code at the OOG-deploy address, slot0 still zero at the revert contract, real code present at the self-reentrant contract, the sender's nonce at exactly 6 (one per transaction in the sequence), and the ordinary plain transfer's recipient balance correctly credited -- proving the OOG/revert/reentrancy invariants above hold identically for a second node independently re-executing the same blocks, not just self-consistently within one chain instance.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains' / '--- PASS: TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains (0.01s)'."
+    }
+  ],
+  "summary": {
+    "total_cases": 4,
+    "passed": 4,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No adversarial case in THIS report's own suite (PR #33) revealed a defect -- all four passed on their first real CI run, including the tight-gas-budget reentrancy case and the two-independent-chain determinism case, which are exactly the shapes most likely to expose an assumption error (M4's own report documents getting a similar reentrancy-gas assumption wrong once and correcting it; that did not recur here). For full milestone honesty: a real production defect WAS found and fixed earlier in this same M7 milestone, during PR #32 (the wiring PR itself), by the two REQUIRED cross-path determinism tests (TestMPTDeterministicWithEVMWorkload and TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock) -- not by this report's own adversarial suite. applyEVMTx originally bumped the sender's nonce unconditionally after every Create/Call returned, on the (wrong) assumption that go-ethereum's vm.EVM.Create never touches the caller's own nonce. Direct re-reading of core/vm/evm.go's create() (line ~511) showed it DOES bump the caller's nonce internally, unconditionally, right after validation passes -- mirroring go-ethereum's own core/state_transition.go, which explicitly bumps the sender's nonce itself only on the Call branch and deliberately skips it on the Create branch for exactly this reason. The original code double-counted it for every deployment (0->1 internally, then 1->2 again), caught by real CI evidence (step-by-step diagnostic logging showing create()'s own internal bump already correct before the second bump ran) before merge -- fixed by capturing the pre-call nonce and setting the final nonce by absolute assignment (preNonce+1) rather than relative increment, correct regardless of whether Create's internal bump was later undone by RevertToSnapshot on the balance-overflow path. Both temporary diagnostics were reverted before merge; the fix is verified by the same two required determinism tests, now green in PR #32's merged CI run.",
+    "regression_sweep": "The same `go test -count=1 ./...` CI run this report's own evidence comes from also exercises chain/contract_test.go, redteam/adversarial_test.go, and vm/adversarial_test.go unchanged -- confirming, by direct CI evidence rather than by the plan's own a-priori low-risk argument alone, that the new EVM dispatch path (isEVMTx, checked before isContractTx in chain/transition.go's applyTxAtSession) left every pre-existing test byte-for-byte green. See go_test_all_summary below: l1chain/chain, l1chain/redteam, l1chain/vm, and l1chain/evm all report 'ok' in the same run as this report's own new adversarial cases."
+  },
+  "acceptance": {
+    "go_vet": { "command": "go vet ./...", "result": "pass" },
+    "go_test_evm_wiring_verbose": {
+      "command": "go test -v -count=1 -run TestAdvEVMWiring ./chain/",
+      "note": "Run as a one-off temporary CI step (this dev environment has no local Go toolchain) solely to capture real per-test evidence for this report; the step was reverted immediately after in the same PR (#33) before merge and does not appear in the merged workflow.",
+      "result": "pass",
+      "raw": [
+        "=== RUN   TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas",
+        "--- PASS: TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas (0.00s)",
+        "=== RUN   TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged",
+        "--- PASS: TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged (0.00s)",
+        "=== RUN   TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic",
+        "--- PASS: TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic (0.00s)",
+        "=== RUN   TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains",
+        "--- PASS: TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains (0.01s)",
+        "PASS",
+        "ok  \tl1chain/chain\t0.016s"
+      ]
+    },
+    "go_test_all_summary": {
+      "command": "go test -count=1 ./...",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/chain\t0.060s",
+        "ok  \tl1chain/cmd/l1\t4.357s",
+        "ok  \tl1chain/consensus\t0.006s",
+        "ok  \tl1chain/core\t0.003s",
+        "ok  \tl1chain/evm\t0.018s",
+        "ok  \tl1chain/evm/adapter\t0.007s",
+        "ok  \tl1chain/exchange\t0.003s",
+        "ok  \tl1chain/node\t0.820s",
+        "ok  \tl1chain/p2p\t43.694s",
+        "ok  \tl1chain/redteam\t0.013s",
+        "ok  \tl1chain/rpc\t0.023s",
+        "ok  \tl1chain/state\t0.002s",
+        "ok  \tl1chain/store\t2.999s",
+        "ok  \tl1chain/trie\t0.004s",
+        "ok  \tl1chain/vm\t0.024s",
+        "ok  \tl1chain/wallet\t0.011s",
+        "source: https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30652132085 job 91227690529, step 'Test'"
+      ]
+    },
+    "race_detector": {
+      "command": "go test -race -count=1 ./node/ ./p2p/",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/node\t1.418s",
+        "ok  \tl1chain/p2p\t46.547s"
+      ]
+    }
+  }
+}
