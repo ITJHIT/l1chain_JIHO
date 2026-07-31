@@ -13,14 +13,17 @@
 //	    Build, sign, and submit a value transfer over JSON-RPC.
 //
 //	l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> \
-//	        --difficulty <n> --alloc <addrHex:amount,...> --mine-interval <dur> \
-//	        --listen-host <host> --listen <port> --peers <multiaddr,...> \
-//	        --identity-key <hex> --mdns
+//	        --difficulty <n> --alloc <addrHex:amount,...> --base-alloc <addrHex:amount,...> \
+//	        --mine-interval <dur> --listen-host <host> --listen <port> \
+//	        --peers <multiaddr,...> --identity-key <hex> --mdns
 //	    Run a node with an HTTP JSON-RPC server, mining on an interval.
 //	    --listen-host defaults to 127.0.0.1; set it to 0.0.0.0 to be
 //	    reachable from sibling Docker containers (see docker-compose.yml).
 //	    --identity-key pins the libp2p peer ID across restarts instead of
-//	    generating a fresh one every time.
+//	    generating a fresh one every time. --alloc funds the native/quote
+//	    asset at genesis; --base-alloc funds the on-chain exchange's base
+//	    asset the same way, so a resting sell order (and therefore a real
+//	    crossing trade) is reachable on a freshly started node.
 package main
 
 import (
@@ -83,7 +86,7 @@ Usage:
   l1 wallet new
   l1 balance --addr <hex> --rpc <url> [--verify]
   l1 send --key <hex> --to <hex> --value <n> --rpc <url>
-  l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> --difficulty <n> --alloc <addrHex:amt,...> --mine-interval <dur>`)
+  l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> --difficulty <n> --alloc <addrHex:amt,...> --base-alloc <addrHex:amt,...> --mine-interval <dur>`)
 }
 
 func cmdWallet(args []string) error {
@@ -239,6 +242,7 @@ func cmdNode(args []string) error {
 	minerKeyHex := fs.String("miner-key", "", "miner private key (hex; empty = generate)")
 	difficulty := fs.Uint("difficulty", 8, "PoW difficulty (leading zero bits)")
 	allocSpec := fs.String("alloc", "", "genesis alloc: addrHex:amount,addrHex:amount,...")
+	baseAllocSpec := fs.String("base-alloc", "", "genesis exchange base-asset alloc: addrHex:amount,addrHex:amount,... (funds the exchange's base asset; --alloc funds the native/quote asset)")
 	mineInterval := fs.Duration("mine-interval", 5*time.Second, "block mining interval")
 	listenHost := fs.String("listen-host", "127.0.0.1", "libp2p TCP listen host (use 0.0.0.0 to be reachable from sibling Docker containers; loopback is not)")
 	listen := fs.Int("listen", 0, "libp2p TCP listen port (0 = ephemeral)")
@@ -270,12 +274,17 @@ func cmdNode(args []string) error {
 	if err != nil {
 		return fmt.Errorf("bad --alloc: %w", err)
 	}
+	baseAlloc, err := parseAlloc(*baseAllocSpec)
+	if err != nil {
+		return fmt.Errorf("bad --base-alloc: %w", err)
+	}
 
 	n, err := node.New(node.Config{
-		DBPath:       *db,
-		MinerKey:     minerKey,
-		Difficulty:   uint32(*difficulty),
-		GenesisAlloc: alloc,
+		DBPath:           *db,
+		MinerKey:         minerKey,
+		Difficulty:       uint32(*difficulty),
+		GenesisAlloc:     alloc,
+		GenesisBaseAlloc: baseAlloc,
 		GenesisTimestamp: *genesisTS,
 	})
 	if err != nil {
