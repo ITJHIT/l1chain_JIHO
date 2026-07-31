@@ -21,11 +21,6 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -count=1 ./...
-      - name: Test (verbose, EVM adversarial suite)
-        # Temporary: captures real per-test PASS lines for the M6 redteam
-        # report's receipt_evidence (this dev environment has no local Go
-        # toolchain to run `go test -v` by hand). Reverted before merge.
-        run: go test -v -count=1 -run TestAdvEVM ./evm/
       - name: Race detector (concurrency-sensitive packages)
         # gcc is available on ubuntu runners, so -race (cgo) works here
         # even though it is unavailable in the pure-Go dev sandbox.
