@@ -27,9 +27,9 @@ const DefaultDHTRendezvous = "l1chain-dht"
 const dhtProtocolPrefix = protocol.ID("/l1chain")
 
 // EnableDHTDiscovery starts a Kademlia DHT on h (server mode) and returns a
-// handle whose Close stops it. It advertises h under rendezvous and runs a
-// background loop that periodically looks up other peers advertising the
-// same rendezvous and dials any not already connected -- the non-LAN
+// handle whose Close stops it. It runs a background loop that periodically
+// (re-)advertises h under rendezvous, looks up other peers advertising the
+// same rendezvous, and dials any not already connected -- the non-LAN
 // counterpart to EnableMDNS (p2p/mdns.go): same shape (advertise + discover
 // + auto-dial), a different bootstrap mechanism for hosts that are already
 // mutually TCP-dialable but don't share an mDNS-visible network segment.
@@ -55,11 +55,16 @@ func EnableDHTDiscovery(ctx context.Context, h host.Host, bootstrapPeers []peer.
 	}
 
 	disc := drouting.NewRoutingDiscovery(kad)
-	if _, err := disc.Advertise(ctx, rendezvous); err != nil {
-		_ = kad.Close()
-		return nil, fmt.Errorf("p2p: dht advertise: %w", err)
-	}
 
+	// Advertise (and FindPeers) both need a populated routing table --
+	// h.Connect above only opens the connection; the DHT protocol's own
+	// handshake with each newly connected peer, which is what actually adds
+	// them to a k-bucket, happens asynchronously afterward. Advertising
+	// immediately here would race that and fail with "failed to find any
+	// peer in table". Advertising on every tick of the same loop that
+	// already does FindPeers self-heals against that race (and against the
+	// provider record's own TTL, which needs periodic refresh anyway) rather
+	// than needing a fixed guess at how long the handshake takes.
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -69,6 +74,8 @@ func EnableDHTDiscovery(ctx context.Context, h host.Host, bootstrapPeers []peer.
 				return
 			case <-ticker.C:
 			}
+			_, _ = disc.Advertise(ctx, rendezvous)
+
 			found, err := disc.FindPeers(ctx, rendezvous)
 			if err != nil {
 				continue
