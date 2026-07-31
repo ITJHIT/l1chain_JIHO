@@ -262,9 +262,6 @@ func TestMPTDeterministicWithEVMWorkload(t *testing.T) {
 				if err := ApplyTxAt(st, tx, acceptAll, height, uint32(i)); err != nil {
 					t.Fatalf("height %d tx %d: %v", height, i, err)
 				}
-				// TEMPORARY DIAGNOSTIC: capture the sender's actual nonce
-				// after each tx to root-cause a CI-only nonce mismatch.
-				t.Logf("DIAG height=%d tx=%d sender.Nonce=%d sender.Balance=%d", height, i, st.GetAccount(tx.From).Nonce, st.GetAccount(tx.From).Balance)
 			}
 		}
 

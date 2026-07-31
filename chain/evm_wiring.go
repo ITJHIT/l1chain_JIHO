@@ -1,7 +1,6 @@
 package chain
 
 import (
-	"log"
 	"math/big"
 
 	"l1chain/core"
@@ -54,10 +53,11 @@ func toGethValue(v uint64) *uint256.Int {
 // -- only the up-front affordability check can reject the transaction
 // outright.
 //
-// The sender's OWN nonce bump is delayed until after Create/Call returns
-// -- see the comment at that point below for why; applyContractTx's own
-// "bump immediately, before running anything" order does NOT transfer
-// here unchanged.
+// The sender's OWN nonce is set to preNonce+1 (an absolute assignment, not
+// a relative bump) after Create/Call returns -- see the comment at that
+// point below for why an absolute set is required here, unlike
+// applyContractTx's own unconditional relative "bump immediately, before
+// running anything" pattern, which does NOT transfer here unchanged.
 //
 // KNOWN LIMITATION: block.timestamp/block.coinbase/block.difficulty are
 // fixed placeholders, not real header fields -- only block.number
@@ -74,11 +74,16 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 		return ErrCantAffordGas
 	}
 
+	// preNonce is the sender's nonce as of immediately before Create/Call
+	// runs. The final nonce is set to preNonce+1 by absolute assignment
+	// (not `acct.Nonce++`) -- see the comment below, at the assignment
+	// itself, for why relative increment double-counts.
+	preNonce := from.Nonce
+
 	// Reserve gas up front; persists regardless of the execution outcome,
 	// same as applyContractTx. The nonce bump is NOT here -- see below.
 	from.Balance -= gasReserve
 	st.SetAccount(tx.From, from)
-	log.Printf("DIAG-WIRE step=after-gas-reserve sender.Nonce(via st)=%d", st.GetAccount(tx.From).Nonce)
 
 	sdb := adapter.New(st)
 	cfg := evm.ModernChainConfig()
@@ -121,35 +126,51 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	}, sdb, cfg, gethvm.Config{})
 	e.SetTxContext(gethvm.TxContext{Origin: fromAddr, GasPrice: new(uint256.Int)})
 
-	// preCall is taken, and Create/Call run, BEFORE the sender's own nonce
-	// is bumped. This is load-bearing for deployment specifically:
+	// preCall is taken, and Create/Call run, BEFORE the sender's own final
+	// nonce is set. This is load-bearing for deployment specifically:
 	// vm.EVM.Create derives the new contract's address as
 	// crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller)) --
-	// reading the caller's CURRENT nonce through this same adapter at the
-	// moment it runs. Create never touches the CALLER's own nonce itself
-	// (confirmed directly against go-ethereum's source: the only SetNonce
-	// call in the whole create() path targets the newly created contract's
-	// own nonce, per EIP-161's "new contracts start at 1", not the
-	// deployer's). Bumping the sender's nonce before this point would
-	// derive every contract one nonce too high, breaking the well-established
-	// "a fresh account's first-ever deployment (nonce 0) lands at
-	// CreateAddress(sender, 0)" convention -- caught by hand-deriving
-	// expected addresses in this package's own cross-path determinism test
-	// before it was ever wired into chain/transition.go for real.
-	log.Printf("DIAG-WIRE step=before-call sdb.GetNonce(fromAddr)=%d st.GetAccount(tx.From).Nonce=%d", sdb.GetNonce(fromAddr), st.GetAccount(tx.From).Nonce)
+	// reading the caller's CURRENT (pre-bump) nonce through this same
+	// adapter at the moment it runs.
+	//
+	// CORRECTION (found via CI diagnostic, not assumption): vm.EVM.Create
+	// (core/vm/evm.go's create(), line ~511) DOES bump the caller's own
+	// nonce internally -- unconditionally, right after validation passes,
+	// via evm.StateDB.SetNonce(caller, nonce+1,
+	// tracing.NonceChangeContractCreator) -- BEFORE the init code even
+	// runs. This mirrors go-ethereum's own core/state_transition.go
+	// exactly: TransitionDb bumps the sender's nonce explicitly itself
+	// ONLY on the Call branch (`st.state.SetNonce(msg.From, ...)`
+	// immediately before `st.evm.Call`), and deliberately skips that bump
+	// on the Create branch, since st.evm.Create already does it. So Create
+	// touches the caller's nonce; Call does not.
+	//
+	// Bumping the sender's nonce a second time, unconditionally, after
+	// Create returns -- this code's original shape -- double-counted it:
+	// create() took it 0->1 internally, then a second `acct.Nonce++` here
+	// took it 1->2, for a single deploy transaction. Root-caused from a
+	// real CI failure (TestMPTDeterministicWithEVMWorkload /
+	// TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock both
+	// observed sender.Nonce=2 after one deploy tx, while step-by-step
+	// diagnostic logging showed create()'s own internal bump already
+	// landing on exactly 1 before this function's own bump ran).
+	//
+	// Fix: below, the final nonce is SET to preNonce+1 by absolute
+	// assignment, not relatively incremented -- correct whether or not
+	// Create already bumped it (Call never does; Create always does, and
+	// that bump is itself undone by RevertToSnapshot(preCall) on the
+	// sdb.Err() overflow path below, so an absolute set is required there
+	// too, not just for the ordinary success path).
 	preCall := sdb.Snapshot()
 	budget := gethvm.NewGasBudget(tx.GasLimit, 0)
 	var gasUsed uint64
 	if isDeploy {
-		_, deployedAddr, result, err := e.Create(fromAddr, tx.Data, budget, value)
+		_, _, result, _ := e.Create(fromAddr, tx.Data, budget, value)
 		gasUsed = result.Used(budget)
-		log.Printf("DIAG-WIRE step=after-create deployedAddr=%s fromAddr=%s equal=%v err=%v", deployedAddr, fromAddr, deployedAddr == fromAddr, err)
 	} else {
-		_, result, err := e.Call(fromAddr, *toAddr, tx.Data, budget, value)
+		_, result, _ := e.Call(fromAddr, *toAddr, tx.Data, budget, value)
 		gasUsed = result.Used(budget)
-		log.Printf("DIAG-WIRE step=after-call err=%v", err)
 	}
-	log.Printf("DIAG-WIRE step=after-call sdb.GetNonce(fromAddr)=%d st.GetAccount(tx.From).Nonce=%d sdb.Err()=%v", sdb.GetNonce(fromAddr), st.GetAccount(tx.From).Nonce, sdb.Err())
 
 	// evm/adapter.StateDB.Err's own doc comment: a balance overflowing
 	// l1chain's uint64 ceiling doesn't itself raise an opcode-level EVM
@@ -175,19 +196,26 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	// already rolled back every touched/selfDestructed entry this call
 	// made, so Finalise here is then an empty no-op.
 	sdb.Finalise(rules.IsEIP158)
-	log.Printf("DIAG-WIRE step=after-finalise st.GetAccount(tx.From).Nonce=%d", st.GetAccount(tx.From).Nonce)
 
-	// Bump the sender's nonce now -- after Create/Call has already derived
-	// any contract address it needed to (see the comment above), but still
-	// unconditional, exactly like applyContractTx's own up-front bump: a
-	// reverted or out-of-gas EVM execution still consumes the nonce.
+	// Set the sender's nonce to preNonce+1 now -- after Create/Call has
+	// already derived any contract address it needed to (see the comment
+	// above). An ABSOLUTE assignment, not a relative `acct.Nonce++`: Create
+	// already moved the nonce to preNonce+1 internally (see above), and
+	// that move survives here unless sdb.Err() triggered a
+	// RevertToSnapshot(preCall), which undoes it back to preNonce -- either
+	// way, setting to preNonce+1 directly lands on the correct value
+	// without caring which path was taken. Call never touches the nonce at
+	// all, so the same assignment is what performs its bump. Every path
+	// (success, EVM-level revert, sdb.Err() overflow) consumes exactly one
+	// nonce, matching applyContractTx's own "reverted or out-of-gas still
+	// consumes the nonce" rule.
 	// Re-reads fresh from st (not the stale `from` captured above) for the
 	// same reason applyContractTx does: execution may have changed this
 	// same account's balance (e.g. it received value back from a nested
 	// call), and this must not clobber that with a stale copy.
 	refund := (tx.GasLimit - gasUsed) * GasPrice
 	acct := st.GetAccount(tx.From)
-	acct.Nonce++
+	acct.Nonce = preNonce + 1
 	acct.Balance += refund
 	st.SetAccount(tx.From, acct)
 	return nil
