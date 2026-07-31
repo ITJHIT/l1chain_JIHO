@@ -214,17 +214,19 @@ having to know much about the other.
   explorer is (see `lib/rpc.ts`, `lib/exchange.ts` for the client-side
   calldata encoding that mirrors `exchange.go` exactly, the way `lib/sign.ts`
   already mirrors transaction signing).
-- **Stated limit, not silently skipped:** genesis currently premines only
-  the native/quote side (`Genesis.Alloc`); there is no minting transaction
-  yet for the base asset, so a real crossing trade needs `exchange.CreditBase`
-  called directly on state — a genesis/test helper, not something a live
-  chain can do today. The batch-clear-and-settle mechanism itself is
-  verified directly against real balances (`exchange` package tests,
-  `chain/exchange_mev_test.go`); what is not yet exercised is that exact
-  path through a full `node.New` → mine → RPC round trip, because nothing
-  can fund the sell side of it yet. Genesis base-asset premine, parallel to
-  the existing native `Alloc` and threaded through the store's durable
-  round-trip the same way, would close this.
+- **Genesis funds both sides, and a real crossing trade is proven over
+  RPC.** `Genesis.BaseAlloc` (`--base-alloc` on `l1 node`, parallel to the
+  existing native/quote `Alloc`/`--alloc`) credits the exchange's base asset
+  at genesis via `exchange.CreditBase`, threaded through `Chain`,
+  `node.Config`, and the store's durable round-trip the same way `Alloc`
+  already was — so a resting sell order, and therefore a real crossing
+  trade, is reachable on a freshly started node, not just inside a
+  hand-built `state.StateDB` fed directly to `ApplyBlockWithMode`.
+  `rpc/exchange_crossing_e2e_test.go` drives the full
+  `node.New` → `sendRawTx` (RPC) → `MineBlock` → RPC-read round trip: a
+  funded sell and a funded buy cross in the same block, and the clear
+  (`getLastAuction`), both parties' settled balances, and the now-flat
+  order book are all read back over real HTTP, not asserted in-process.
 
 ## Hardening (post-M4)
 
