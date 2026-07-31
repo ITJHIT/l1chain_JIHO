@@ -1,7 +1,7 @@
 // Package p2p provides real libp2p peer-to-peer networking for the l1chain
-// full node: a TCP libp2p host, GossipSub propagation of blocks and
-// transactions over two topics, and a stream-based chain-sync protocol for new
-// or lagging nodes to catch up.
+// full node: a libp2p host listening on both TCP and QUIC, GossipSub
+// propagation of blocks and transactions over two topics, and a stream-based
+// chain-sync protocol for new or lagging nodes to catch up.
 //
 // It never trusts a peer: every block received from the network is validated
 // through node.AcceptExternalBlock, which drives the same chain.AddBlock path
@@ -107,7 +107,17 @@ func NewHostWithConfig(ctx context.Context, cfg HostConfig) (host.Host, error) {
 	}
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/%s/tcp/%d", listenHost, cfg.ListenPort)),
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/%s/tcp/%d", listenHost, cfg.ListenPort),
+			// QUIC transport is already registered on every host by
+			// go-libp2p's own DefaultTransports (this repo's ListenAddrs
+			// never call libp2p.Transport, leaving cfg.Transports nil) --
+			// the only missing piece was a QUIC-shaped listen address.
+			// Same port number as TCP: UDP and TCP are separate namespaces,
+			// so there is no actual conflict, and it keeps one port to
+			// document/firewall per node instead of two.
+			fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", listenHost, cfg.ListenPort),
+		),
 		libp2p.ConnectionManager(cm),
 	)
 	if err != nil {
