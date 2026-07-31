@@ -16,7 +16,8 @@
 //	        --difficulty <n> --alloc <addrHex:amount,...> --base-alloc <addrHex:amount,...> \
 //	        --mine-interval <dur> --listen-host <host> --listen <port> \
 //	        --peers <multiaddr,...> --identity-key <hex> --mdns \
-//	        --relay-service --relay <multiaddr>
+//	        --relay-service --relay <multiaddr> \
+//	        --dht --dht-bootstrap <multiaddr,...>
 //	    Run a node with an HTTP JSON-RPC server, mining on an interval.
 //	    --listen-host defaults to 127.0.0.1; set it to 0.0.0.0 to be
 //	    reachable from sibling Docker containers (see docker-compose.yml).
@@ -30,6 +31,9 @@
 //	    on a peer running --relay-service, so THIS node becomes reachable
 //	    at /p2p/<relay>/p2p-circuit/p2p/<this node> without a direct
 //	    address of its own.
+//	    --dht enables Kademlia DHT peer discovery (advertise + find +
+//	    auto-dial under a shared rendezvous) -- the non-LAN counterpart
+//	    to --mdns; --dht-bootstrap seeds its routing table.
 package main
 
 import (
@@ -261,6 +265,8 @@ func cmdNode(args []string) error {
 	identityKeyHex := fs.String("identity-key", "", "hex seed for a fixed libp2p peer identity (empty = fresh identity every restart); pins the peer ID so other nodes' --peers can name this node's multiaddr ahead of time")
 	relayService := fs.Bool("relay-service", false, "become a circuit-relay-v2 relay other peers can reserve a slot on and be reached through")
 	relaySpec := fs.String("relay", "", "full multiaddr of a relay (running --relay-service) to reserve a slot on, so peers can reach this node at /p2p/<relay>/p2p-circuit/p2p/<this node> without a direct address of its own")
+	dhtEnabled := fs.Bool("dht", false, "enable Kademlia DHT peer discovery: advertise and find other l1chain nodes under a shared rendezvous, dialing any found -- the non-LAN counterpart to --mdns")
+	dhtBootstrapSpec := fs.String("dht-bootstrap", "", "comma-separated multiaddrs to seed the DHT routing table; at least one live peer is required for --dht to discover anything beyond an empty table")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -384,6 +390,31 @@ func cmdNode(args []string) error {
 			return fmt.Errorf("p2p mdns: %w", err)
 		}
 		fmt.Printf("mdns discovery enabled (tag %q)\n", p2p.DefaultMDNSTag)
+	}
+
+	// Enable DHT peer discovery -- the non-LAN counterpart to --mdns. Runs
+	// for the node's lifetime (bound to ctx).
+	if *dhtEnabled {
+		var dhtBootstrap []peer.AddrInfo
+		for _, addr := range strings.Split(*dhtBootstrapSpec, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr == "" {
+				continue
+			}
+			m, err := ma.NewMultiaddr(addr)
+			if err != nil {
+				return fmt.Errorf("bad --dht-bootstrap %q: %w", addr, err)
+			}
+			pi, err := peer.AddrInfoFromP2pAddr(m)
+			if err != nil {
+				return fmt.Errorf("bad --dht-bootstrap %q: %w", addr, err)
+			}
+			dhtBootstrap = append(dhtBootstrap, *pi)
+		}
+		if _, err := p2p.EnableDHTDiscovery(ctx, h, dhtBootstrap, p2p.DefaultDHTRendezvous); err != nil {
+			return fmt.Errorf("p2p dht: %w", err)
+		}
+		fmt.Printf("dht discovery enabled (rendezvous %q, %d bootstrap peer(s))\n", p2p.DefaultDHTRendezvous, len(dhtBootstrap))
 	}
 
 	go func() {
