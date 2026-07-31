@@ -20,17 +20,17 @@ import (
 // fullStateDB is a TEST-ONLY wrapper satisfying the complete vm.StateDB
 // interface early, by embedding this package's real, in-progress *StateDB
 // (promoting every method already implemented -- SelfDestruct,
-// IsNewContract, AddBalance, SubBalance, Snapshot/RevertToSnapshot, etc.)
-// and stubbing only what later PRs haven't implemented yet: transient
-// storage/access lists/Prepare (PR3), and
-// GetStateAndCommittedState/logs/witness/Finalise/SetTxContext (PR4).
+// IsNewContract, AddBalance, SubBalance, Snapshot/RevertToSnapshot,
+// transient storage/access lists/Prepare (PR3), etc.) and stubbing only
+// what PR4 hasn't built yet: GetStateAndCommittedState/GetState/SetState
+// (contract storage itself -- not needed by anything wired through this
+// wrapper so far) and logs/witness/Finalise/SetTxContext.
 //
-// This exists so THIS test can drive a real vm.EVM through the real,
-// unexported opSelfdestruct6780 opcode now -- proving SelfDestruct/
-// IsNewContract/AddBalance/SubBalance are wire-compatible with the actual
-// opcode's real call pattern, rather than discovering a mismatch only once
-// *StateDB reaches full conformance in PR4 (at which point this wrapper is
-// deleted and these tests can drive *StateDB directly).
+// This exists so tests in this package can drive a real vm.EVM through
+// real, unexported opcodes now -- proving each new piece is wire-compatible
+// with the actual opcode call patterns, rather than discovering a mismatch
+// only once *StateDB reaches full conformance in PR4 (at which point this
+// wrapper is deleted and these tests can drive *StateDB directly).
 type fullStateDB struct {
 	*StateDB
 }
@@ -41,14 +41,6 @@ func (fullStateDB) GetStateAndCommittedState(common.Address, common.Hash) (commo
 func (fullStateDB) GetState(common.Address, common.Hash) common.Hash { return common.Hash{} }
 func (fullStateDB) SetState(common.Address, common.Hash, common.Hash) common.Hash {
 	return common.Hash{}
-}
-func (fullStateDB) GetTransientState(common.Address, common.Hash) common.Hash { return common.Hash{} }
-func (fullStateDB) SetTransientState(common.Address, common.Hash, common.Hash) {}
-func (fullStateDB) AddressInAccessList(common.Address) bool                    { return true }
-func (fullStateDB) SlotInAccessList(common.Address, common.Hash) (bool, bool)  { return true, true }
-func (fullStateDB) AddAddressToAccessList(common.Address)                      {}
-func (fullStateDB) AddSlotToAccessList(common.Address, common.Hash)            {}
-func (fullStateDB) Prepare(params.Rules, common.Address, common.Address, *common.Address, []common.Address, types.AccessList) {
 }
 func (fullStateDB) AddLog(*types.Log)                              {}
 func (fullStateDB) LogsForBurnAccounts() []*types.Log               { return nil }
@@ -137,15 +129,22 @@ func deployVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from commo
 	return addr
 }
 
-func callVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from, to common.Address, gas uint64) {
+// callVia returns the scalar gas used, in the same capability-grade (not
+// consensus-grade) sense evm.Harness.Call already documents -- useful here
+// specifically to compare relative costs (e.g. cold vs. warm SLOAD), not to
+// assert an exact absolute number.
+func callVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from, to common.Address, gas uint64) uint64 {
 	t.Helper()
 	rules := rulesFor(cfg)
 	sdb.Prepare(rules, from, common.Address{}, &to, vm.ActivePrecompiles(rules), nil)
 	e := newTestEVM(sdb, cfg)
 	e.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
-	if _, _, err := e.Call(from, to, nil, vm.NewGasBudget(gas, 0), new(uint256.Int)); err != nil {
+	budget := vm.NewGasBudget(gas, 0)
+	_, result, err := e.Call(from, to, nil, budget, new(uint256.Int))
+	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
+	return result.Used(budget)
 }
 
 // selfdestructBytecode is PUSH20 <beneficiary> SELFDESTRUCT -- 22 bytes.

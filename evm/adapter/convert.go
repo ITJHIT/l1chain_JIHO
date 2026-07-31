@@ -35,6 +35,13 @@ func toCommonHash(h core.Hash) common.Hash {
 	return out
 }
 
+// toCoreHash converts go-ethereum's common.Hash to l1chain's own core.Hash.
+func toCoreHash(h common.Hash) core.Hash {
+	var out core.Hash
+	copy(out[:], h[:])
+	return out
+}
+
 // toUint256 widens an l1chain uint64 balance to go-ethereum's 256-bit
 // balance type. Always exact -- every uint64 fits in a uint256.
 func toUint256(v uint64) *uint256.Int {
