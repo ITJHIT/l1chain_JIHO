@@ -15,7 +15,8 @@
 //	l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> \
 //	        --difficulty <n> --alloc <addrHex:amount,...> --base-alloc <addrHex:amount,...> \
 //	        --mine-interval <dur> --listen-host <host> --listen <port> \
-//	        --peers <multiaddr,...> --identity-key <hex> --mdns
+//	        --peers <multiaddr,...> --identity-key <hex> --mdns \
+//	        --relay-service --relay <multiaddr>
 //	    Run a node with an HTTP JSON-RPC server, mining on an interval.
 //	    --listen-host defaults to 127.0.0.1; set it to 0.0.0.0 to be
 //	    reachable from sibling Docker containers (see docker-compose.yml).
@@ -24,6 +25,11 @@
 //	    asset at genesis; --base-alloc funds the on-chain exchange's base
 //	    asset the same way, so a resting sell order (and therefore a real
 //	    crossing trade) is reachable on a freshly started node.
+//	    --relay-service makes this node a circuit-relay-v2 relay other
+//	    peers can reserve a slot on; --relay <multiaddr> reserves a slot
+//	    on a peer running --relay-service, so THIS node becomes reachable
+//	    at /p2p/<relay>/p2p-circuit/p2p/<this node> without a direct
+//	    address of its own.
 package main
 
 import (
@@ -48,6 +54,9 @@ import (
 	"l1chain/p2p"
 	"l1chain/rpc"
 	"l1chain/wallet"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
@@ -250,6 +259,8 @@ func cmdNode(args []string) error {
 	mdnsEnabled := fs.Bool("mdns", false, "enable mDNS LAN peer auto-discovery (no --peers needed on the same LAN)")
 	genesisTS := fs.Int64("genesis-timestamp", 0, "genesis block unix timestamp; REQUIRED to match across nodes for identical genesis")
 	identityKeyHex := fs.String("identity-key", "", "hex seed for a fixed libp2p peer identity (empty = fresh identity every restart); pins the peer ID so other nodes' --peers can name this node's multiaddr ahead of time")
+	relayService := fs.Bool("relay-service", false, "become a circuit-relay-v2 relay other peers can reserve a slot on and be reached through")
+	relaySpec := fs.String("relay", "", "full multiaddr of a relay (running --relay-service) to reserve a slot on, so peers can reach this node at /p2p/<relay>/p2p-circuit/p2p/<this node> without a direct address of its own")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -327,6 +338,31 @@ func cmdNode(args []string) error {
 		fmt.Printf("p2p listening: %s\n", addr)
 	}
 	fmt.Printf("p2p peer id: %s\n", h.ID())
+
+	if *relayService {
+		if _, err := p2p.EnableRelayService(h); err != nil {
+			return fmt.Errorf("p2p relay service: %w", err)
+		}
+		fmt.Println("relay service enabled: other peers may reserve a slot and be reached through this node")
+	}
+	if *relaySpec != "" {
+		m, err := ma.NewMultiaddr(*relaySpec)
+		if err != nil {
+			return fmt.Errorf("bad --relay: %w", err)
+		}
+		relayInfo, err := peer.AddrInfoFromP2pAddr(m)
+		if err != nil {
+			return fmt.Errorf("bad --relay: %w", err)
+		}
+		// ReserveRelaySlot (via the underlying client.Reserve) already adds
+		// relayInfo.Addrs to the peerstore itself before dialing -- no need
+		// to do it here too.
+		if err := p2p.ReserveRelaySlot(ctx, h, *relayInfo); err != nil {
+			return fmt.Errorf("p2p relay reservation: %w", err)
+		}
+		fmt.Printf("reserved a slot on relay %s: reachable at /p2p/%s/p2p-circuit/p2p/%s\n",
+			relayInfo.ID, relayInfo.ID, h.ID())
+	}
 
 	// Dial any startup peers so gossip meshes form immediately.
 	for _, addr := range strings.Split(*peers, ",") {
