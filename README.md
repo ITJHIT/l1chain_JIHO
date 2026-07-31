@@ -49,6 +49,7 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 | **M4** | EVM compatibility (hybrid): B2 subset-from-scratch (M3) + B1 embedded go-ethereum `core/vm` running a real ERC-20 over keccak/MPT state | ✅ done |
 | **Exchange** | A deterministic limit order book inside the state transition, with a batch-auction matching mode and RPC/explorer exposure. See [On-chain exchange](#on-chain-exchange) below | ✅ done |
 | **M5** | Real from-scratch SHA-256 Merkle Patricia Trie (two-level: world trie + per-account storage tries) replacing the placeholder flat-hash state root; light-client account/storage proofs over RPC + independent CLI verification; a genuine 3-container Docker Compose testnet with real libp2p peer discovery; eclipse-attack + inbound-sync-flood defenses (`ConnectionManager`, stream cap) with adversarial tests proven to fail without them | ✅ done |
+| **M6** | Genesis base-asset premine closing the on-chain exchange's last gap (a real crossing trade proven over the full `node.New` → RPC → `MineBlock` round trip); DHT peer discovery + circuit-relay-v2 P2P; real solc-compiled OpenZeppelin ERC20 + precompile calls through the EVM harness, frozen with CI-verified drift detection | ✅ done |
 
 ## Features
 
@@ -152,6 +153,7 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - `m3-vm-redteam-report.json` — infinite loop OOG, stack under/overflow, invalid jumps, storage isolation, reentrancy bounds, determinism
 - `m4-evm-redteam-report.json` — OOG deploy/call, revert integrity, gas-bounded loops, reentrancy, deterministic MPT root
 - `m5-p2p-hardening-redteam-report.json` — eclipse attempt (many sybil peer connections, bounded by a real libp2p connection manager), inbound sync-stream flood (bounded by a per-node concurrency cap), liveness preserved under both
+- `m6-evm-solc-redteam-report.json` — real solc-compiled OpenZeppelin ERC20 deploy/mint/transfer with a real `Transfer` event and a real `Ownable` revert path, plus a real precompile-0x1 (`ecrecover`) call, both through genuine solc bytecode with CI-verified drift detection against the source
 
 ## Design notes
 
@@ -243,7 +245,7 @@ Implemented on top of the milestones:
 Still deferred (heavier / environment-bound):
 
 - **Genuine NAT traversal.** DHT discovery and circuit-relay above are both real, but neither is a NAT-crossing claim: they're proven among hosts that are already mutually TCP-dialable (in-process tests, no real NAT topology exists to test against here). Two narrower, honestly-scoped pieces remain open: (1) **AutoNAT** (a node detecting whether it is itself behind a NAT) — go-libp2p's own AutoNAT tests only exercise this via mocked/scripted peer responses or a `ForceReachability*` override, never a real NAT, so there was nothing to honestly claim beyond what's already true by default (client-side relay dialing is on regardless of reachability); (2) **DCUtR hole-punching against a real simulated NAT/firewall** — go-libp2p's own test suite proves this genuinely (`p2p/protocol/holepunch`, backed by `github.com/marcopolo/simnet`'s packet-level NAT simulation), but only over QUIC — this repo's host is TCP-only (`p2p/host.go`), so proving it here would first require adding an entire QUIC transport, a materially larger, separately-scoped change.
-- EVM: run solc-compiled OpenZeppelin contracts, event logs, precompiles. The chain's own canonical state is a real SHA-256 MPT as of M5 (`state/mpt.go`) — what remains deferred is specifically unifying it with the EVM module's own internal, separately-keyed keccak/MPT execution state (M4), which still exists as its own isolated store.
+- **EVM/MPT unification.** The chain's own canonical state is a real SHA-256 MPT as of M5 (`state/mpt.go`) — what remains deferred is specifically unifying it with the EVM module's own internal, separately-keyed keccak/MPT execution state (M4), which still exists as its own isolated store. Running real solc-compiled OpenZeppelin contracts, event logs, and precompiles — previously listed here as deferred — is now proven end to end as of M6: `contracts/` compiles real OpenZeppelin v5 contracts with pinned solc, frozen into `evm/oz_erc20_fixture.go` with CI-verified drift detection, and `evm/oz_adversarial_test.go` deploys/calls the real bytecode, asserting a real `Transfer` event (the actual solc-derived signature hash), a real OZ `Ownable` require/revert path, and a real precompile-0x1 (`ecrecover`) call. See [`m6-evm-solc-redteam-report.json`](artifacts/m6-evm-solc-redteam-report.json).
 
 ## License
 

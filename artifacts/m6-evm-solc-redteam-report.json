@@ -1,0 +1,118 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M6",
+  "title": "M6 real solc-compiled OpenZeppelin ERC20 / precompile adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-07-31",
+  "lane": "executor-qa-red-team (21-M4RedTeam lineage, extended to real solc-compiled bytecode)",
+  "target": "evm/runtime.go Harness (real github.com/ethereum/go-ethereum v1.17.4 vm.EVM) executing REAL solc-compiled bytecode (contracts/L1Token.sol: OpenZeppelin v5 ERC20+Ownable; contracts/Precompiles.sol: a precompile-calling contract), frozen into evm/oz_erc20_fixture.go with CI-verified drift detection against a fresh compile on every run.",
+  "test_packages": ["l1chain/evm"],
+  "test_files": ["evm/oz_adversarial_test.go", "evm/tx_context_test.go", "evm/runtime.go", "contracts/contracts/L1Token.sol", "contracts/contracts/Precompiles.sol"],
+  "production_code_modified": true,
+  "principle": "Confirmed against real go-ethereum v1.17.4 source before any code was written: LOG0-LOG4 (core/vm/instructions.go's makeLog -> StateDB.AddLog) and all precompiles 0x1-0xa (vm.NewEVM's activePrecompiledContracts, driven by ModernChainConfig's Cancun activation) were ALREADY fully wired and working -- Harness.State is go-ethereum's own real *state.StateDB, not a custom adapter, so nothing needed to change there. The actual, sole gap was compiled bytecode: the only fixture (erc20_fixture.go) is hand-assembled because solc was never installed in this build environment; it never emits LOG opcodes at all, which is why a second, genuine gap (AddLog tagging every log with a zero-value TxHash, because Harness never called StateDB.SetTxContext) stayed unobserved until real solc output that always emits Transfer was introduced. This milestone closes both: a self-contained contracts/ Node/Hardhat project compiles real OpenZeppelin v5 contracts with pinned solc (verified locally end-to-end before any CI push -- compile+freeze from a clean rebuild reproduces byte-for-byte identical output), frozen into a checked-in Go fixture (evm/oz_erc20_fixture.go, generated programmatically from the frozen JSON to avoid hand-transcription errors in ~18KB of hex) with a freshness test (evm/oz_fixture_freshness_test.go) proving it matches; the TxHash gap is fixed in evm/runtime.go (Harness.SetTxContext wiring); and evm/oz_adversarial_test.go deploys/calls the real bytecode end to end. Unlike M1-M5's reports, production_code_modified is true here by design (the TxHash fix), same as M5's precedent for the same reason -- explained here rather than silently breaking the established convention.",
+  "new_test_names": [
+    "TestHarnessTagsEmittedLogsWithARealTxHash",
+    "TestFrozenGoFixtureMatchesFrozenJSON",
+    "TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash",
+    "TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-9",
+      "test": "TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash",
+      "scenario": "Deploy contracts/L1Token.sol's real solc-compiled creation bytecode with an ABI-encoded constructor arg (initialSupply=1,000,000), call transfer(recipient, 1000) via real selector dispatch (parsed from the real ABI, not hand-encoded), read back both balances via balanceOf, then call the onlyOwner-guarded mint(recipient, 1) from a NON-owner address.",
+      "expected": "Deployer starts with the full initial supply; after transfer, recipient=1000 and deployer=999999 (unchanged conservation); h.Logs() contains a real Transfer event on the token address whose Topics[0] equals the ABI's own real solc-derived event signature hash (not asserted against a hand-computed constant) with a non-zero TxHash; mint() from a non-owner reverts (real OZ Ownable require/revert path through real bytecode, not a hand-rolled shape).",
+      "verdict": "passed",
+      "receipt_evidence": "CI run https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30620890742 job 91124926194 (temporary verbose step, reverted after): '=== RUN   TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash' / '--- PASS: TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash (0.00s)'. Confirming CI run (matches the merged CI shape, non-verbose): https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30620698027 job 91124307347, 'ok  l1chain/evm  0.027s'."
+    },
+    {
+      "id": "case-10",
+      "test": "TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode",
+      "scenario": "Sign a real message hash with a freshly generated secp256k1 key (crypto.GenerateKey + crypto.Sign), deploy contracts/Precompiles.sol's real solc-compiled bytecode, ABI-encode and call its recover(hash, v, r, s) -- which itself calls the Solidity ecrecover builtin, i.e. precompile address 0x1 -- through the real bytecode.",
+      "expected": "The address returned by the real solc-compiled contract's ecrecover call, dispatched through go-ethereum's already-wired PrecompiledContractsCancun table (evm/runtime.go), matches the real signer's address exactly.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run, verbose step: '=== RUN   TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode' / '--- PASS: TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode (0.00s)'."
+    },
+    {
+      "id": "case-tx-context",
+      "test": "TestHarnessTagsEmittedLogsWithARealTxHash",
+      "scenario": "Isolated, no-solc-needed synthetic proof of the SetTxContext fix on its own: minimal hand-assembled LOG0+STOP runtime bytecode, called twice.",
+      "expected": "Both calls' emitted logs carry a non-zero TxHash, and the two calls' TxHash values are DIFFERENT from each other (proves a real per-call derivation, not a fixed non-zero constant that would coincidentally pass a single-call check).",
+      "verdict": "passed",
+      "receipt_evidence": "Part of the same `l1chain/evm` package pass (see go_test_all_summary below); isolated as its own test specifically so this fix is provably exercised independent of the larger real-OZ-contract test."
+    },
+    {
+      "id": "case-fixture-freshness",
+      "test": "TestFrozenGoFixtureMatchesFrozenJSON",
+      "scenario": "Reads contracts/frozen/L1Token.json and contracts/frozen/Precompiles.json at test time (no solc needed) and asserts evm/oz_erc20_fixture.go's Go constants match exactly: ABI compared as parsed JSON (reflect.DeepEqual, not fragile raw-string equality), bytecode compared as literal strings.",
+      "expected": "Exact match on both contracts, proving the checked-in Go fixture was generated correctly from the real frozen JSON.",
+      "verdict": "passed",
+      "receipt_evidence": "Part of the same `l1chain/evm` package pass; the companion CI job `Contracts (solc compile + fixture drift check)` (https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30620698027 job 91124307446, pass, 20s) independently proves the frozen JSON itself is exactly what a fresh real-solc compile produces -- together these two checks close the full provenance chain from real solc output to the Go constants this milestone's tests actually execute."
+    }
+  ],
+  "summary": {
+    "total_cases": 4,
+    "passed": 4,
+    "failed": 0,
+    "defects_found": 1,
+    "note": "One real, small production defect found and fixed: Harness never called StateDB.SetTxContext, so every log ever emitted through this harness carried a zero-value TxHash. It was unobservable through M4 and the hand-assembled fixture (which never emits LOG opcodes at all) -- only became visible once real solc output that always emits Transfer was introduced for this milestone. Fixed in evm/runtime.go (Harness gains a monotonic txCounter; Deploy/Call each derive a distinct synthetic tx hash and call SetTxContext before executing), verified in isolation by TestHarnessTagsEmittedLogsWithARealTxHash and end-to-end by case-9's real Transfer event assertion. Everything else confirmed already correct by direct inspection of go-ethereum v1.17.4 source before any code was written: LOG opcodes and all nine precompiles (0x1-0xa) were already fully wired via the unmodified real state.StateDB and vm.NewEVM's activePrecompiledContracts -- this milestone's actual scope was narrower than the README's prior wording implied (\"run solc-compiled OpenZeppelin contracts, event logs, precompiles\" read as three separate gaps; only compiled bytecode and one small TxHash wiring bug were real gaps). The solc/OpenZeppelin compile pipeline itself was verified locally end-to-end (this dev sandbox has working Node/npm, unlike Go) before ever pushing to CI: npm install, hardhat compile, and the freeze script all succeeded, and a clean rebuild reproduced byte-for-byte identical frozen output, confirming the CI drift-detection job would be meaningful rather than flaky -- which it then proved on its first real CI run."
+  },
+  "acceptance": {
+    "go_vet": { "command": "go vet ./...", "result": "pass" },
+    "go_test_evm_verbose": {
+      "command": "go test -v -count=1 -run TestAdvEVM ./evm/",
+      "note": "Run as a one-off temporary CI step (this dev environment has no local Go toolchain) solely to capture real per-test evidence for this report; the step was reverted immediately after in the same PR before merge and does not appear in the merged workflow.",
+      "result": "pass",
+      "raw": [
+        "=== RUN   TestAdvEVM01OutOfGasDeployAndCall",
+        "--- PASS: TestAdvEVM01OutOfGasDeployAndCall (0.00s)",
+        "=== RUN   TestAdvEVM02SelfTransferAndZeroTransfer",
+        "--- PASS: TestAdvEVM02SelfTransferAndZeroTransfer (0.00s)",
+        "=== RUN   TestAdvEVM03OverspendRevertPreservesSupply",
+        "--- PASS: TestAdvEVM03OverspendRevertPreservesSupply (0.00s)",
+        "=== RUN   TestAdvEVM04InfiniteLoopGasBounded",
+        "--- PASS: TestAdvEVM04InfiniteLoopGasBounded (0.00s)",
+        "=== RUN   TestAdvEVM05CallEmptyCodeAddress",
+        "--- PASS: TestAdvEVM05CallEmptyCodeAddress (0.00s)",
+        "=== RUN   TestAdvEVM06RecursionBoundedByDepthAndGas",
+        "--- PASS: TestAdvEVM06RecursionBoundedByDepthAndGas (0.00s)",
+        "=== RUN   TestAdvEVM07DeterministicAdversarialSequence",
+        "--- PASS: TestAdvEVM07DeterministicAdversarialSequence (0.00s)",
+        "=== RUN   TestAdvEVM08MalformedCalldata",
+        "--- PASS: TestAdvEVM08MalformedCalldata (0.00s)",
+        "=== RUN   TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash",
+        "--- PASS: TestAdvEVM09OZERC20DeployMintTransferEmitsLogsWithRealTxHash (0.00s)",
+        "=== RUN   TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode",
+        "--- PASS: TestAdvEVM10PrecompileEcrecoverViaRealSolcBytecode (0.00s)",
+        "PASS",
+        "ok  \tl1chain/evm\t0.008s"
+      ]
+    },
+    "go_test_all_summary": {
+      "command": "go test -count=1 ./...",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/chain\t0.023s",
+        "ok  \tl1chain/cmd/l1\t2.269s",
+        "ok  \tl1chain/consensus\t0.005s",
+        "ok  \tl1chain/core\t0.005s",
+        "ok  \tl1chain/evm\t0.027s",
+        "ok  \tl1chain/exchange\t0.003s",
+        "ok  \tl1chain/node\t0.068s",
+        "ok  \tl1chain/p2p\t62.504s",
+        "ok  \tl1chain/redteam\t0.019s",
+        "ok  \tl1chain/rpc\t0.032s",
+        "ok  \tl1chain/state\t0.003s",
+        "ok  \tl1chain/store\t0.032s",
+        "ok  \tl1chain/trie\t0.006s",
+        "ok  \tl1chain/vm\t0.034s",
+        "ok  \tl1chain/wallet\t0.018s"
+      ]
+    },
+    "contracts_drift_check": {
+      "command": "cd contracts && npm ci && npm run compile && npm run freeze && git diff --exit-code -- frozen/",
+      "result": "pass",
+      "note": "Verified locally end-to-end before the first CI push (real solc 0.8.24 compiling real @openzeppelin/contracts 5.6.1, byte-for-byte reproducible across a clean rebuild), then confirmed green on GitHub Actions' own runners: https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30620698027 job 91124307446 (pass, 20s)."
+    }
+  }
+}
