@@ -116,14 +116,38 @@ func (h *Harness) newEVM(origin common.Address) *vm.EVM {
 		BaseFee:          new(big.Int),
 		BlobBaseFee:      new(big.Int),
 		CostPerStateByte: params.CostPerStateByte,
+		// vm.NewEVM derives its own internal chainRules as
+		// h.ChainConfig.Rules(num, blockCtx.Random != nil, time) -- every
+		// post-Merge fork field params.ChainConfig.Rules computes
+		// (IsShanghai/IsCancun/...) is gated behind isMerge
+		// (params/config.go: "IsCancun: isMerge && c.IsCancun(...)"), not
+		// derived from CancunTime/ShanghaiTime alone. Without a non-nil
+		// Random here, ModernChainConfig's own doc comment ("every fork
+		// through Cancun activated... so PUSH0 ... are available") was
+		// FALSE as actually wired: the jump-table switch in vm.NewEVM fell
+		// through past every isMerge-gated case straight to the pre-Shanghai
+		// London instruction set. Found while adding evm/adapter's real
+		// opSelfdestruct6780 (EIP-6780, Cancun-only) coverage -- that test
+		// hit the exact same gap and traced it to this line. Silently
+		// harmless so far only because solc 0.8.24 defaults to targeting
+		// evmVersion "paris" (confirmed via contracts/artifacts/build-info),
+		// which needs nothing London can't already execute -- see
+		// TestModernChainConfigReachesShanghaiAndCancun below for the
+		// regression proof this doesn't silently regress again.
+		Random: &common.Hash{},
 	}
 	e := vm.NewEVM(blockCtx, h.State, h.ChainConfig, vm.Config{})
 	e.SetTxContext(vm.TxContext{Origin: origin, GasPrice: h.GasPrice})
 	return e
 }
 
+// rules mirrors newEVM's own isMerge signal (see its Random field comment)
+// for the separate ChainConfig.Rules(...) call Prepare/ActivePrecompiles
+// need -- vm.NewEVM's internal rules computation and this one must agree,
+// or Prepare would warm a different precompile set than the one actually
+// active in the interpreter.
 func (h *Harness) rules() params.Rules {
-	return h.ChainConfig.Rules(h.BlockNumber, false, h.Time)
+	return h.ChainConfig.Rules(h.BlockNumber, true, h.Time)
 }
 
 // newTxContext derives a distinct synthetic tx hash from h.txCounter and
