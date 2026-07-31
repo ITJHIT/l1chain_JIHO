@@ -7,8 +7,12 @@ import (
 	"l1chain/state"
 
 	"github.com/ethereum/go-ethereum/common"
+	gethstate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -61,6 +65,30 @@ type StateDB struct {
 	warmAddrs map[core.Address]bool
 	warmSlots map[addrSlot]bool
 	transient map[addrSlot]core.Hash
+
+	// committed caches each (address, slot)'s value as of the start of the
+	// CURRENT transaction (reset by Prepare, populated lazily on first
+	// access), giving GetStateAndCommittedState a genuine "original" value
+	// to diff against even though base is mutated eagerly with no separate
+	// staging layer of its own. Never journaled: what a slot looked like
+	// before this transaction started stays true regardless of any
+	// intra-transaction Snapshot/RevertToSnapshot.
+	committed map[addrSlot]core.Hash
+
+	// logs/thash/txIndex back AddLog/Logs/SetTxContext, mirroring the exact
+	// pattern already proven this session in evm/runtime.go's SetTxContext
+	// fix. A flat, insertion-ordered slice (Index is always len(logs) at
+	// append time) is sufficient here -- unlike go-ethereum's own per-tx-hash
+	// map, this adapter has no need to look logs up by a hash other than
+	// the current one.
+	logs    []*types.Log
+	thash   common.Hash
+	txIndex int
+
+	// preimages is a debug/tracing side channel (SHA3 preimages seen by the
+	// interpreter) with zero consensus impact -- never journaled, matching
+	// go-ethereum's own AddPreimage.
+	preimages map[common.Hash][]byte
 }
 
 // addrSlot is the composite (address, storage key) key access-list slot
@@ -435,6 +463,9 @@ func (s *StateDB) Prepare(rules params.Rules, sender, coinbase common.Address, d
 		}
 	}
 	s.transient = make(map[addrSlot]core.Hash)
+	// committed also resets here: it must reflect each slot's value as of
+	// the START of THIS transaction, and Prepare is exactly that boundary.
+	s.committed = make(map[addrSlot]core.Hash)
 }
 
 func (s *StateDB) GetTransientState(addr common.Address, key common.Hash) common.Hash {
@@ -467,3 +498,173 @@ func (s *StateDB) SetTransientState(addr common.Address, key, value common.Hash)
 func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 	return s.selfDestructed[toCoreAddress(addr)]
 }
+
+// --- Contract storage, logs, finalisation --------------------------------
+
+func (s *StateDB) GetState(addr common.Address, key common.Hash) common.Hash {
+	return toCommonHash(s.base.GetStorage(toCoreAddress(addr), toCoreHash(key)))
+}
+
+// cacheCommitted captures as's value the first time it's seen in the
+// current transaction (see the committed field's doc comment), a no-op on
+// every later call for the same slot within the same transaction.
+func (s *StateDB) cacheCommitted(as addrSlot) {
+	if s.committed == nil {
+		s.committed = make(map[addrSlot]core.Hash)
+	}
+	if _, ok := s.committed[as]; ok {
+		return
+	}
+	s.committed[as] = s.base.GetStorage(as.addr, as.slot)
+}
+
+// SetState sets addr's storage at key and returns the previous value, per
+// vm.StateDB's contract. Always touches addr (matching SetNonce/AddBalance/
+// SubBalance/SetCode's own "always touch, even on a no-op" convention) and
+// caches the pre-transaction committed value before applying the write, so
+// GetStateAndCommittedState has something real to diff against regardless
+// of which of the two callers reaches a given slot first.
+func (s *StateDB) SetState(addr common.Address, key, value common.Hash) common.Hash {
+	a := toCoreAddress(addr)
+	s.touch(a)
+	k := toCoreHash(key)
+	as := addrSlot{addr: a, slot: k}
+	s.cacheCommitted(as)
+	prev := s.base.GetStorage(a, k)
+	s.base.SetStorage(a, k, toCoreHash(value))
+	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
+		s.base.SetStorage(a, k, prev)
+	})
+	return toCommonHash(prev)
+}
+
+// GetStateAndCommittedState returns (current, committed) -- current is
+// whatever base holds right now (this transaction's own writes already
+// applied, since base is mutated eagerly); committed is the lazily-cached
+// value as of Prepare (see the committed field's doc comment). Real
+// go-ethereum's own EIP-2200/3529 SSTORE gas function
+// (core/vm/operations_acl.go's makeGasSStoreFunc) calls this FIRST, before
+// SetState, to decide gas/refunds -- caching here too (not only in
+// SetState) is what makes a read-only GetStateAndCommittedState call, on
+// its own, establish the committed baseline correctly.
+func (s *StateDB) GetStateAndCommittedState(addr common.Address, key common.Hash) (common.Hash, common.Hash) {
+	a := toCoreAddress(addr)
+	k := toCoreHash(key)
+	as := addrSlot{addr: a, slot: k}
+	s.cacheCommitted(as)
+	return toCommonHash(s.base.GetStorage(a, k)), toCommonHash(s.committed[as])
+}
+
+// SetTxContext tags subsequent AddLog calls with thash/ti, mirroring the
+// exact pattern already proven this session in evm/runtime.go's
+// SetTxContext fix.
+func (s *StateDB) SetTxContext(thash common.Hash, ti int, _ uint32) {
+	s.thash = thash
+	s.txIndex = ti
+}
+
+// AddLog is journaled, matching go-ethereum's own AddLog exactly: a nested
+// CALL can emit a LOG opcode and then revert (its own failure, or an outer
+// call reverting around it), and that log must not survive in Logs() --
+// only a real per-entry undo, not just "logs are append-only," gets this
+// right.
+func (s *StateDB) AddLog(log *types.Log) {
+	log.TxHash = s.thash
+	log.TxIndex = uint(s.txIndex)
+	log.Index = uint(len(s.logs))
+	s.logs = append(s.logs, log)
+	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
+		s.logs = s.logs[:len(s.logs)-1]
+	})
+}
+
+// Logs returns every log recorded via AddLog so far, in emission order.
+func (s *StateDB) Logs() []*types.Log { return s.logs }
+
+// LogsForBurnAccounts is an Amsterdam-only (EIP-7708 burn logs) feature;
+// safe to stub nil since ModernChainConfig never activates Amsterdam (see
+// evm/runtime.go) -- re-audit if that ever changes.
+func (s *StateDB) LogsForBurnAccounts() []*types.Log { return nil }
+
+// AddPreimage is a debug/tracing side channel (SHA3 preimages seen by the
+// interpreter) with zero consensus impact -- never journaled, matching
+// go-ethereum's own AddPreimage exactly.
+func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
+	if _, ok := s.preimages[hash]; ok {
+		return
+	}
+	if s.preimages == nil {
+		s.preimages = make(map[common.Hash][]byte)
+	}
+	cp := make([]byte, len(preimage))
+	copy(cp, preimage)
+	s.preimages[hash] = cp
+}
+
+// Witness/AccessEvents are verkle/EIP-4762 features; safe to stub nil for
+// the same reason LogsForBurnAccounts is -- ModernChainConfig never
+// activates IsEIP4762/IsUBT (see evm/runtime.go). Re-audit alongside
+// LogsForBurnAccounts if the chain config or go-ethereum dependency version
+// ever changes.
+func (s *StateDB) Witness() *stateless.Witness            { return nil }
+func (s *StateDB) AccessEvents() *gethstate.AccessEvents { return nil }
+
+// Finalise deletes every touched address that is either self-destructed or
+// (when deleteEmptyObjects, i.e. EIP-161/Spurious Dragon is active) still
+// empty at the end of the transaction -- mirroring go-ethereum's own
+// Finalise (core/state/statedb.go), which applies exactly the same two-part
+// OR across its journal.mutations set.
+//
+// The self-destructed check alone (without separately re-checking
+// IsNewContract) is correct here for the same reason it's correct in real
+// go-ethereum: SelfDestruct (see SelfDestruct's own doc comment) is only
+// ever called by opSelfdestruct6780's "newContract" branch in the first
+// place, so s.selfDestructed[addr]==true already implies it was created
+// this transaction, by construction -- there is no second path that could
+// set it otherwise.
+//
+// "Delete" here means resetting the account to the zero Account in base;
+// state/mpt.go's own SetAccount already turns that into a real trie
+// deletion (its isEmpty check). Old storage-trie nodes and code blobs are
+// left orphaned in the content-addressed maps rather than walked and
+// scrubbed, exactly like real Ethereum's own trie GC model (unreachable,
+// not synchronously erased).
+//
+// What Finalise deliberately does NOT do: reset touched/selfDestructed/
+// newContracts bookkeeping for addresses that SURVIVE the transaction. In
+// go-ethereum, a surviving address's stateObject (and its newContract/
+// selfDestructed flags) persists across the rest of the BLOCK, shared by
+// every remaining transaction's StateDB calls -- whether that's the right
+// model for THIS adapter (one instance per transaction, vs. one per block)
+// is a production-wiring decision, deliberately left open for PR6 rather
+// than guessed at here.
+func (s *StateDB) Finalise(deleteEmptyObjects bool) *bal.ConstructionBlockAccessList {
+	for addr := range s.touched {
+		if s.selfDestructed[addr] || (deleteEmptyObjects && basePersistedEmpty(s.base.GetAccount(addr))) {
+			s.base.SetAccount(addr, state.Account{})
+			// Deleting is safe during range over the same map (the Go spec
+			// guarantees this). Clearing touched/selfDestructed/newContracts
+			// here (not just base) matters: Exist still checks s.touched
+			// first, so leaving it set would make a just-deleted address
+			// keep reading as existing -- exactly mirroring real
+			// go-ethereum's own delete(s.stateObjects, obj.address) for the
+			// same deleted-this-call case (see Finalise's own doc comment
+			// above for what deliberately stays untouched: SURVIVING
+			// addresses, not deleted ones).
+			delete(s.touched, addr)
+			delete(s.selfDestructed, addr)
+			delete(s.newContracts, addr)
+		}
+	}
+	return nil
+}
+
+// basePersistedEmpty is EIP-161 emptiness (balance = nonce = code = 0) --
+// the same definition Empty(common.Address) uses, restated here to operate
+// directly on an already-fetched state.Account instead of re-deriving one
+// from an address.
+func basePersistedEmpty(acct state.Account) bool {
+	return acct.Balance == 0 && acct.Nonce == 0 && acct.CodeHash.IsZero()
+}
+
+var _ vm.StateDB = (*StateDB)(nil)
