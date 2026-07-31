@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"log"
 	"math/big"
 
 	"l1chain/core"
@@ -77,6 +78,7 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	// same as applyContractTx. The nonce bump is NOT here -- see below.
 	from.Balance -= gasReserve
 	st.SetAccount(tx.From, from)
+	log.Printf("DIAG-WIRE step=after-gas-reserve sender.Nonce(via st)=%d", st.GetAccount(tx.From).Nonce)
 
 	sdb := adapter.New(st)
 	cfg := evm.ModernChainConfig()
@@ -134,16 +136,20 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	// CreateAddress(sender, 0)" convention -- caught by hand-deriving
 	// expected addresses in this package's own cross-path determinism test
 	// before it was ever wired into chain/transition.go for real.
+	log.Printf("DIAG-WIRE step=before-call sdb.GetNonce(fromAddr)=%d st.GetAccount(tx.From).Nonce=%d", sdb.GetNonce(fromAddr), st.GetAccount(tx.From).Nonce)
 	preCall := sdb.Snapshot()
 	budget := gethvm.NewGasBudget(tx.GasLimit, 0)
 	var gasUsed uint64
 	if isDeploy {
-		_, _, result, _ := e.Create(fromAddr, tx.Data, budget, value)
+		_, deployedAddr, result, err := e.Create(fromAddr, tx.Data, budget, value)
 		gasUsed = result.Used(budget)
+		log.Printf("DIAG-WIRE step=after-create deployedAddr=%s fromAddr=%s equal=%v err=%v", deployedAddr, fromAddr, deployedAddr == fromAddr, err)
 	} else {
-		_, result, _ := e.Call(fromAddr, *toAddr, tx.Data, budget, value)
+		_, result, err := e.Call(fromAddr, *toAddr, tx.Data, budget, value)
 		gasUsed = result.Used(budget)
+		log.Printf("DIAG-WIRE step=after-call err=%v", err)
 	}
+	log.Printf("DIAG-WIRE step=after-call sdb.GetNonce(fromAddr)=%d st.GetAccount(tx.From).Nonce=%d sdb.Err()=%v", sdb.GetNonce(fromAddr), st.GetAccount(tx.From).Nonce, sdb.Err())
 
 	// evm/adapter.StateDB.Err's own doc comment: a balance overflowing
 	// l1chain's uint64 ceiling doesn't itself raise an opcode-level EVM
@@ -169,6 +175,7 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	// already rolled back every touched/selfDestructed entry this call
 	// made, so Finalise here is then an empty no-op.
 	sdb.Finalise(rules.IsEIP158)
+	log.Printf("DIAG-WIRE step=after-finalise st.GetAccount(tx.From).Nonce=%d", st.GetAccount(tx.From).Nonce)
 
 	// Bump the sender's nonce now -- after Create/Call has already derived
 	// any contract address it needed to (see the comment above), but still
