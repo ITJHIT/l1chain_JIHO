@@ -44,6 +44,31 @@ jobs:
       - name: Build
         run: npx next build
 
+  contracts:
+    name: Contracts (solc compile + fixture drift check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+      - name: Install (pinned solc + OpenZeppelin)
+        run: npm ci
+      - name: Compile with pinned solc, refreeze
+        run: |
+          npm run compile
+          npm run freeze
+      # Proves both "real solc really compiled this" and "the checked-in
+      # fixture is exactly reproducible" -- on every run, not a one-time
+      # generation. See contracts/README.md.
+      - name: Assert no drift between freshly-compiled bytecode and the checked-in fixture
+        run: git diff --exit-code -- frozen/
+
   testnet:
     name: Multi-node testnet (docker compose)
     runs-on: ubuntu-latest
