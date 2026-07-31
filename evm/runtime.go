@@ -1,6 +1,7 @@
 package evm
 
 import (
+	"encoding/binary"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -9,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -40,6 +42,15 @@ type Harness struct {
 	BlockNumber *big.Int
 	Time        uint64
 	GasPrice    *uint256.Int
+
+	// txCounter derives a distinct synthetic tx hash for each Deploy/Call, so
+	// h.State.SetTxContext (see newTxContext) tags any LOG emitted with a
+	// real, non-zero TxHash instead of state.StateDB's zero-value default.
+	// This was previously unset entirely -- unobservable while the only
+	// fixture (erc20_fixture.go) was hand-assembled bytecode that never
+	// emits LOG0-4, but real solc output (oz_erc20_fixture.go) always emits
+	// Transfer on mint/transfer.
+	txCounter uint64
 }
 
 // NewHarness constructs a Harness over a fresh, empty real state.
@@ -115,9 +126,27 @@ func (h *Harness) rules() params.Rules {
 	return h.ChainConfig.Rules(h.BlockNumber, false, h.Time)
 }
 
+// newTxContext derives a distinct synthetic tx hash from h.txCounter and
+// tags h.State with it via SetTxContext, so any LOG opcode this call
+// executes (core/vm/instructions.go's makeLog -> StateDB.AddLog) records a
+// real, non-zero TxHash rather than the zero-value default that resulted
+// from SetTxContext never being called at all before this. index/
+// blockAccessIndex are both 0: Harness has no notion of "multiple txs in one
+// block" to assign a real position within, so 0 is the only meaningful value
+// -- what matters for the fix is TxHash, not TxIndex.
+func (h *Harness) newTxContext() common.Hash {
+	h.txCounter++
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], h.txCounter)
+	txHash := crypto.Keccak256Hash(buf[:])
+	h.State.SetTxContext(txHash, 0, 0)
+	return txHash
+}
+
 // Deploy runs contract-creation bytecode from `from` and returns the deployed
 // contract address plus scalar gas consumed.
 func (h *Harness) Deploy(from common.Address, code []byte, gas uint64) (common.Address, uint64, error) {
+	h.newTxContext()
 	rules := h.rules()
 	h.State.Prepare(rules, from, common.Address{}, nil, vm.ActivePrecompiles(rules), nil)
 	e := h.newEVM(from)
@@ -129,12 +158,20 @@ func (h *Harness) Deploy(from common.Address, code []byte, gas uint64) (common.A
 // Call executes a message call into `to` with the given ABI-encoded input and
 // returns the raw return data plus scalar gas consumed.
 func (h *Harness) Call(from, to common.Address, input []byte, gas uint64) ([]byte, uint64, error) {
+	h.newTxContext()
 	rules := h.rules()
 	h.State.Prepare(rules, from, common.Address{}, &to, vm.ActivePrecompiles(rules), nil)
 	e := h.newEVM(from)
 	budget := vm.NewGasBudget(gas, 0)
 	ret, result, err := e.Call(from, to, input, budget, new(uint256.Int))
 	return ret, result.Used(budget), err
+}
+
+// Logs returns every log emitted by this Harness's State so far (across all
+// Deploy/Call invocations), each tagged with the real per-call TxHash
+// newTxContext derived -- see state.StateDB.Logs.
+func (h *Harness) Logs() []*types.Log {
+	return h.State.Logs()
 }
 
 // Code returns the runtime bytecode stored at addr.
