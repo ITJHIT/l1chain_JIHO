@@ -22,7 +22,7 @@ Two companion repos round out the portfolio this belongs to: [`lowlat-oms-core`]
 │    ├── p2p/       libp2p host · gossipsub · /l1/sync stream          │
 │    ├── vm/        custom stack VM (gas, storage, CALL)   [M3]        │
 │    ├── evm/       embedded go-ethereum EVM · ERC-20      [M4]        │
-│    ├── state/     StateDB abstraction (KV → MPT-ready)              │
+│    ├── state/     StateDB, MPT-backed (secure trie + proofs)        │
 │    ├── store/     BoltDB persistence                               │
 │    ├── wallet/    secp256k1 keys · sign · verify                   │
 │    └── core/      block · tx · merkle · hash · address             │
@@ -48,12 +48,13 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 | **M3** | Custom stack VM: gas metering, contract deploy/call, journaled storage, deterministic mining==validation | ✅ done |
 | **M4** | EVM compatibility (hybrid): B2 subset-from-scratch (M3) + B1 embedded go-ethereum `core/vm` running a real ERC-20 over keccak/MPT state | ✅ done |
 | **Exchange** | A deterministic limit order book inside the state transition, with a batch-auction matching mode and RPC/explorer exposure. See [On-chain exchange](#on-chain-exchange) below | ✅ done |
+| **M5** | Real from-scratch SHA-256 Merkle Patricia Trie (two-level: world trie + per-account storage tries) replacing the placeholder flat-hash state root; light-client account/storage proofs over RPC + independent CLI verification; a genuine 3-container Docker Compose testnet with real libp2p peer discovery; eclipse-attack + inbound-sync-flood defenses (`ConnectionManager`, stream cap) with adversarial tests proven to fail without them | ✅ done |
 
 ## Features
 
 - **Consensus** — Bitcoin-style Proof-of-Work with leading-zero-bit targets, difficulty retargeting toward a ~10s block interval, and longest-(heaviest-)chain reorg with full state replay.
 - **Native coin** — account/balance model, ECDSA secp256k1 signatures, genesis allocation, fixed block reward (coinbase credited into canonical state), infinite supply.
-- **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps) against slow/malicious peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
+- **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps, a connection-count watermark, and an inbound-sync-stream cap as of M5) against slow/malicious/many-sybil peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
 - **Smart contracts** — a from-scratch stack VM (M3) with Ethereum-numbered opcodes, gas, out-of-gas revert, and CALL depth limits; plus an embedded go-ethereum EVM (M4) that deploys and runs a standard ERC-20 with keccak-derived mapping storage.
 - **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`, `getOrderBookDepth`, `getOrderBook`, `getLastAuction`, `getExchangeBalance`, `getAccountProof`, `getStorageProof`), a CLI (`wallet`/`balance` [`--verify` for a real light-client check, not a trusted `getBalance`]/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier) plus a live `/exchange` order-book view.
 - **On-chain exchange** — a deterministic limit order book reachable through ordinary signed transactions, in either continuous or batch-auction matching mode. See below.
@@ -155,7 +156,7 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 ## Design notes
 
 - **Determinism is consensus-critical.** Mining and validation compute block state roots through the *identical* derivation path (replay from genesis, sorted map-free hashing, no wall-clock/randomness). Contract execution (M3) and the state root fold are deterministic so every node agrees.
-- **StateDB is an interface** (`state/StateDB`) so the M1 KV model can be swapped for a Merkle-Patricia-Trie without touching block validation, RPC, or the VM — the seam M4's EVM state uses.
+- **StateDB is an interface** (`state/StateDB`), which is what let the M1 flat-hash placeholder be swapped (M5) for a real Merkle-Patricia-Trie (`state/mpt.go`, now the production default) without touching block validation, RPC, or the VM — the same seam M4's EVM state uses.
 - **The EVM (M4) is an execution capability**, cleanly isolated from chain consensus (nothing imports `l1chain/evm`). Full opcode/precompile/MPT byte-for-byte chain-consensus equivalence is a documented long-term goal.
 
 ## On-chain exchange
@@ -238,7 +239,7 @@ Implemented on top of the milestones:
 Still deferred (heavier / environment-bound):
 
 - Real-internet NAT traversal: DHT peer discovery + AutoNAT/relay (mDNS covers LAN; internet relay untested in the sandbox).
-- EVM: run solc-compiled OpenZeppelin contracts, event logs, precompiles; promote the canonical chain StateDB to MPT/keccak for byte-for-byte consensus equivalence.
+- EVM: run solc-compiled OpenZeppelin contracts, event logs, precompiles. The chain's own canonical state is a real SHA-256 MPT as of M5 (`state/mpt.go`) — what remains deferred is specifically unifying it with the EVM module's own internal, separately-keyed keccak/MPT execution state (M4), which still exists as its own isolated store.
 
 ## License
 
