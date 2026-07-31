@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"l1chain/core"
+	"l1chain/evm"
 	"l1chain/state"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -229,36 +230,60 @@ func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int, _ tracing
 
 // --- Code -------------------------------------------------------------
 
+// GetCode returns the UNTAGGED runtime bytes -- what the embedded EVM (and
+// EXTCODECOPY/EXTCODESIZE) should ever see as "the code," transparently
+// stripping evm.TagCode's magic prefix if SetCode (below) put it there.
+// l1chain's own dispatch layer (chain/transition.go) is the one place
+// meant to see the TAGGED bytes, by reading the underlying state.StateDB
+// directly rather than through this adapter.
 func (s *StateDB) GetCode(addr common.Address) []byte {
-	return s.base.GetCode(toCoreAddress(addr))
+	return evm.UntagCode(s.base.GetCode(toCoreAddress(addr)))
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
-	return len(s.base.GetCode(toCoreAddress(addr)))
+	return len(s.GetCode(addr))
 }
 
-// GetCodeHash uses l1chain's own convention -- the all-zero Hash for an
-// account with no code (state/mpt.go's SetCode, len(code)==0 branch) --
-// never go-ethereum's keccak256(nil) EmptyCodeHash constant. l1chain's trie
-// is SHA-256 throughout with zero keccak usage anywhere; matching its own
-// existing zero-means-absent convention here keeps this adapter consistent
-// with every other codehash check already in this codebase, rather than
-// introducing a second, keccak-flavored "empty" sentinel value.
+// GetCodeHash recomputes the hash over the UNTAGGED view (matching
+// GetCode/GetCodeSize) rather than trusting the persisted account's own
+// CodeHash field -- which, since SetCode below always persists TAGGED
+// bytes, would otherwise reflect the tag's own presence and disagree with
+// a contract that hashes its own EXTCODECOPY'd bytes and compares against
+// EXTCODEHASH, a real pattern some contracts use. Empty code (l1chain's
+// own no-code convention: the all-zero Hash, never go-ethereum's
+// keccak256(nil) EmptyCodeHash constant -- l1chain's trie is SHA-256
+// throughout) short-circuits rather than hashing zero bytes.
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
-	return toCommonHash(s.base.GetAccount(toCoreAddress(addr)).CodeHash)
+	code := s.GetCode(addr)
+	if len(code) == 0 {
+		return common.Hash{}
+	}
+	return toCommonHash(core.SumHash(code))
 }
 
-// SetCode sets addr's runtime code and returns the previous code, per
-// vm.StateDB's contract. Reverting replays base.SetCode with the previous
-// bytes, which correctly recomputes the previous CodeHash too (SetCode
-// derives CodeHash from code content) -- no separate CodeHash undo needed.
+// SetCode always persists TAGGED bytes (evm.TagCode) and returns the
+// previous UNTAGGED code, per vm.StateDB's contract. Tagging unconditionally
+// is safe: SetCode has exactly one caller in the entire go-ethereum
+// interpreter (core/vm/evm.go's initNewContract, installing a newly
+// deployed contract's runtime code), so every call this adapter ever
+// receives is, by construction, real EVM contract code -- and the tag is
+// l1chain's ONLY way to later recognize that fact by inspecting raw stored
+// bytes, since l1chain has no separate per-account "contract kind" field.
 func (s *StateDB) SetCode(addr common.Address, code []byte, _ tracing.CodeChangeReason) []byte {
 	a := toCoreAddress(addr)
 	s.touch(a)
-	prev := s.base.GetCode(a)
-	s.base.SetCode(a, code)
+	prev := evm.UntagCode(s.base.GetCode(a))
+	if len(code) == 0 {
+		s.base.SetCode(a, nil)
+	} else {
+		s.base.SetCode(a, evm.TagCode(code))
+	}
 	s.journal.entries = append(s.journal.entries, func(s *StateDB) {
-		s.base.SetCode(a, prev)
+		if len(prev) == 0 {
+			s.base.SetCode(a, nil)
+		} else {
+			s.base.SetCode(a, evm.TagCode(prev))
+		}
 	})
 	return prev
 }
