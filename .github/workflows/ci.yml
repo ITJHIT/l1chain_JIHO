@@ -15,6 +15,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Tidy modules (temporary -- resolves the newly-added go-libp2p-kad-dht dependency; this dev sandbox has no local Go toolchain to run `go mod tidy` with, so the real go.mod/go.sum are captured from this CI run's diff and committed properly, then this step is reverted)
+        run: |
+          go mod tidy
+          git diff --no-color go.mod go.sum
       - name: Vet
         run: go vet ./...
       - name: Build
