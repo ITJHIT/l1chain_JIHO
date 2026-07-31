@@ -7,6 +7,7 @@ import (
 	"l1chain/chain"
 	"l1chain/consensus"
 	"l1chain/core"
+	"l1chain/exchange"
 	"l1chain/state"
 	"l1chain/wallet"
 )
@@ -245,5 +246,69 @@ func TestRestartDurability(t *testing.T) {
 	c, ok, err := Load(empty)
 	if err != nil || ok || c != nil {
 		t.Fatalf("Load(empty): c=%v ok=%v err=%v", c, ok, err)
+	}
+}
+
+// TestRestartDurabilityWithBaseAlloc is TestRestartDurability's counterpart
+// for the genesis base-asset allocation: proves PutGenesisBaseAlloc /
+// GetGenesisBaseAlloc round-trip a real chain through a full
+// Save -> close -> reopen -> Load cycle, with the reloaded chain's StateRoot
+// and exchange.BaseOf balance matching the original exactly -- the durable
+// counterpart to the in-memory TestNewChainWithAllocMatchesGenesisStateRoot
+// in chain/genesis_test.go.
+func TestRestartDurabilityWithBaseAlloc(t *testing.T) {
+	seller := core.Address{7}
+	buyer := core.Address{8}
+	alloc := map[core.Address]uint64{buyer: 1000}
+	baseAlloc := map[core.Address]uint64{seller: 500}
+
+	gb := chain.Genesis{Alloc: alloc, BaseAlloc: baseAlloc, Difficulty: testDiff, Timestamp: 0}.ToBlock()
+	orig := chain.NewChainWithAlloc(gb, alloc, baseAlloc)
+
+	dbPath := filepath.Join(t.TempDir(), "durable_base.db")
+	s1, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open s1: %v", err)
+	}
+	if err := Save(s1, orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s1.PutGenesisAlloc(alloc); err != nil {
+		t.Fatalf("PutGenesisAlloc: %v", err)
+	}
+	if err := s1.PutGenesisBaseAlloc(baseAlloc); err != nil {
+		t.Fatalf("PutGenesisBaseAlloc: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close s1: %v", err)
+	}
+
+	s2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open s2: %v", err)
+	}
+	defer s2.Close()
+
+	reloaded, ok, err := Load(s2)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Load reported no head after Save")
+	}
+
+	if reloaded.State().StateRoot() != orig.State().StateRoot() {
+		t.Fatalf("state root mismatch after reload")
+	}
+	wantTotal, wantLocked := exchange.BaseOf(orig.State(), seller)
+	gotTotal, gotLocked := exchange.BaseOf(reloaded.State(), seller)
+	if gotTotal != wantTotal || gotLocked != wantLocked {
+		t.Fatalf("reloaded base balance = (%d,%d), want (%d,%d)", gotTotal, gotLocked, wantTotal, wantLocked)
+	}
+	if gotTotal != 500 {
+		t.Fatalf("reloaded seller base balance = %d, want 500", gotTotal)
+	}
+	if got := reloaded.State().GetAccount(buyer).Balance; got != 1000 {
+		t.Fatalf("reloaded buyer balance = %d, want 1000", got)
 	}
 }
