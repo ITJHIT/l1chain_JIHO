@@ -106,6 +106,15 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 		return exchange.Apply(st, tx, height, index)
 	}
 
+	// Real embedded EVM contracts (evm/adapter) are routed here, before
+	// isContractTx, for the same reason the exchange check above runs
+	// first: a deployed EVM contract "has code" by isContractTx's own
+	// definition too, and would otherwise be misrouted to the StackVM. See
+	// isEVMTx's own doc comment (chain/evm_wiring.go).
+	if isEVMTx(st, tx) {
+		return applyEVMTx(st, tx, from, height)
+	}
+
 	if isContractTx(st, tx) {
 		return applyContractTx(st, tx, from)
 	}
