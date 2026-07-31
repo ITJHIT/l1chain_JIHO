@@ -8,6 +8,8 @@ A learning/portfolio Layer-1 blockchain built from first principles in Go: Proof
 
 Every component is implemented from scratch (not a fork), test-covered, and adversarially red-teamed.
 
+Two companion repos round out the portfolio this belongs to: [`lowlat-oms-core`](https://github.com/ITJHIT/lowlat-oms-core) (a low-latency C++ order management system — the off-chain counterpart to this chain's consensus-facing constraints) and [`onchain-orderbook`](https://github.com/ITJHIT/onchain-orderbook) (the deterministic matching engine wired into this chain's [On-chain exchange](#on-chain-exchange) below).
+
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │  cmd/l1 (CLI + node daemon)      web/ (Next.js block explorer)      │
@@ -110,6 +112,21 @@ p2p/<id>` (Docker's own internal DNS, not a raw IP) over a shared volume
 once it knows its own peer ID; node2/node3 block on that file before
 starting. CI drives this exact compose file end-to-end and polls all three
 nodes' RPC from outside the compose network until they agree.
+
+Real convergence, from a green CI run (three separate containers, polled
+over plain HTTP from outside the compose network entirely):
+
+```
+attempt 1: node1=0:cee5a2765c67c7197306262bfeee96b9a8583f8fee5fb36acfa7601c0b33da52 node2= node3=
+attempt 2: node1=1:00272b56d87b82993f681a4bd38227b192357c632866861e77e7ec486d0bb2e8 node2=1:00272b56d87b82993f681a4bd38227b192357c632866861e77e7ec486d0bb2e8 node3=1:00272b56d87b82993f681a4bd38227b192357c632866861e77e7ec486d0bb2e8
+attempt 3: node1=3:003d6b63d7b74c63f67cd3e5fd09863ee4bf64b1ba763ba34b51cf3e40558362 node2=3:003d6b63d7b74c63f67cd3e5fd09863ee4bf64b1ba763ba34b51cf3e40558362 node3=3:003d6b63d7b74c63f67cd3e5fd09863ee4bf64b1ba763ba34b51cf3e40558362
+converged at 3:003d6b63d7b74c63f67cd3e5fd09863ee4bf64b1ba763ba34b51cf3e40558362
+```
+
+At attempt 1, node1 has mined alone (node2/node3 return nothing — they
+haven't received node1's advertised multiaddr yet). By attempt 2 all three
+already agree at height 1; by attempt 3 all three agree at height 3, hash
+and all. ([full job log](https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30559467454/job/90928429823))
 
 ### Block explorer
 
