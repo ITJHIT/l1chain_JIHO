@@ -73,8 +73,28 @@ func newTestEVM(sdb vm.StateDB, cfg *params.ChainConfig) *vm.EVM {
 		BaseFee:          new(big.Int),
 		BlobBaseFee:      new(big.Int),
 		CostPerStateByte: params.CostPerStateByte,
+		// vm.NewEVM derives its own internal chainRules as
+		// cfg.Rules(num, blockCtx.Random != nil, time) -- every post-Merge
+		// fork field (IsShanghai/IsCancun/...) in params.ChainConfig.Rules
+		// is gated behind isMerge (params/config.go: "IsCancun: isMerge &&
+		// c.IsCancun(...)"), so CancunTime alone is NOT sufficient; without
+		// a non-nil Random here, EIP-6780 (enable6780, wired at the Cancun
+		// instruction set) never actually applies and SELFDESTRUCT silently
+		// falls back to the old unconditional pre-Cancun opcode. Only the
+		// non-nilness is load-bearing for isMerge; the value itself is only
+		// consumed by the PREVRANDAO opcode, unused here.
+		Random: &common.Hash{},
 	}
 	return vm.NewEVM(blockCtx, sdb, cfg, vm.Config{})
+}
+
+// rulesFor mirrors newTestEVM's own isMerge signal (see its Random field
+// comment) for the SEPARATE cfg.Rules(...) call Prepare/ActivePrecompiles
+// need -- vm.NewEVM's internal rules computation and this one must agree,
+// or Prepare would warm a different precompile set than the one actually
+// active in the interpreter.
+func rulesFor(cfg *params.ChainConfig) params.Rules {
+	return cfg.Rules(big.NewInt(1), true, 1)
 }
 
 // modernChainConfig mirrors evm.ModernChainConfig() (every fork through
@@ -106,7 +126,7 @@ func modernChainConfig() *params.ChainConfig {
 
 func deployVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from common.Address, code []byte, value *uint256.Int, gas uint64) common.Address {
 	t.Helper()
-	rules := cfg.Rules(big.NewInt(1), false, 1)
+	rules := rulesFor(cfg)
 	sdb.Prepare(rules, from, common.Address{}, nil, vm.ActivePrecompiles(rules), nil)
 	e := newTestEVM(sdb, cfg)
 	e.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
@@ -119,7 +139,7 @@ func deployVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from commo
 
 func callVia(t *testing.T, sdb vm.StateDB, cfg *params.ChainConfig, from, to common.Address, gas uint64) {
 	t.Helper()
-	rules := cfg.Rules(big.NewInt(1), false, 1)
+	rules := rulesFor(cfg)
 	sdb.Prepare(rules, from, common.Address{}, &to, vm.ActivePrecompiles(rules), nil)
 	e := newTestEVM(sdb, cfg)
 	e.SetTxContext(vm.TxContext{Origin: from, GasPrice: new(uint256.Int)})
