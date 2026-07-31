@@ -37,7 +37,7 @@ const dhtProtocolPrefix = protocol.ID("/l1chain")
 // required for discovery to find anything beyond an empty table. The loop
 // runs until ctx is cancelled or Close is called.
 func EnableDHTDiscovery(ctx context.Context, h host.Host, bootstrapPeers []peer.AddrInfo, rendezvous string) (io.Closer, error) {
-	kad, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.ProtocolPrefix(dhtProtocolPrefix))
+	kad, err := dht.New(h, dht.Mode(dht.ModeServer), dht.ProtocolPrefix(dhtProtocolPrefix))
 	if err != nil {
 		return nil, fmt.Errorf("p2p: new dht: %w", err)
 	}
