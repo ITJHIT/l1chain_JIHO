@@ -15,8 +15,9 @@ var (
 	bucketHeights = []byte("heights") // canonical height (big-endian u64) -> block hash
 	bucketMeta    = []byte("meta")    // misc metadata
 
-	metaHead  = []byte("head")          // -> head block hash
-	metaAlloc = []byte("genesis_alloc") // -> encoded genesis allocation map
+	metaHead      = []byte("head")               // -> head block hash
+	metaAlloc     = []byte("genesis_alloc")      // -> encoded genesis allocation map
+	metaBaseAlloc = []byte("genesis_base_alloc") // -> encoded genesis base-asset allocation map
 )
 
 // Store is a BoltDB-backed durable block/chain store.
@@ -189,6 +190,46 @@ func (s *Store) GetGenesisAlloc() (map[core.Address]uint64, bool, error) {
 	)
 	err := s.db.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketMeta).Get(metaAlloc)
+		if v == nil {
+			return nil
+		}
+		dec, err := decodeAlloc(v)
+		if err != nil {
+			return err
+		}
+		alloc = dec
+		found = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return alloc, found, nil
+}
+
+// PutGenesisBaseAlloc persists the genesis base-asset allocation map (see
+// chain.Genesis.BaseAlloc), structurally identical to PutGenesisAlloc but
+// under its own key -- the two assets are independent allocations, both
+// needed to faithfully reproduce State() after a restart.
+func (s *Store) PutGenesisBaseAlloc(alloc map[core.Address]uint64) error {
+	enc, err := encodeAlloc(alloc)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).Put(metaBaseAlloc, enc)
+	})
+}
+
+// GetGenesisBaseAlloc returns the persisted genesis base-asset allocation.
+// found is false (nil error) when no base allocation was recorded.
+func (s *Store) GetGenesisBaseAlloc() (map[core.Address]uint64, bool, error) {
+	var (
+		alloc map[core.Address]uint64
+		found bool
+	)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketMeta).Get(metaBaseAlloc)
 		if v == nil {
 			return nil
 		}

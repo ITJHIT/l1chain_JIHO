@@ -67,6 +67,10 @@ type Config struct {
 	// GenesisAlloc is the funded genesis allocation used when a fresh chain is
 	// created. Ignored when an existing chain is loaded from the store.
 	GenesisAlloc map[core.Address]uint64
+	// GenesisBaseAlloc credits the on-chain exchange's base asset at genesis,
+	// parallel to GenesisAlloc (see chain.Genesis.BaseAlloc). Ignored when an
+	// existing chain is loaded from the store.
+	GenesisBaseAlloc map[core.Address]uint64
 	// GenesisTimestamp, when non-zero, fixes the genesis block timestamp so
 	// independently constructed nodes (e.g. a multi-node network) produce an
 	// identical genesis block/hash. When zero the current time is used.
@@ -107,7 +111,8 @@ type Node struct {
 	Difficulty uint32
 	chainID    uint64
 
-	alloc map[core.Address]uint64
+	alloc     map[core.Address]uint64
+	baseAlloc map[core.Address]uint64
 }
 
 // New constructs a Node from cfg. If a store head already exists at DBPath the
@@ -127,6 +132,7 @@ func New(cfg Config) (*Node, error) {
 		Difficulty: cfg.Difficulty,
 		chainID:    chainID,
 		alloc:      cfg.GenesisAlloc,
+		baseAlloc:  cfg.GenesisBaseAlloc,
 		maxMempool: maxMempool,
 	}
 
@@ -149,6 +155,9 @@ func New(cfg Config) (*Node, error) {
 			if alloc, have, err := s.GetGenesisAlloc(); err == nil && have {
 				n.alloc = alloc
 			}
+			if baseAlloc, have, err := s.GetGenesisBaseAlloc(); err == nil && have {
+				n.baseAlloc = baseAlloc
+			}
 			return n, nil
 		}
 	}
@@ -160,15 +169,20 @@ func New(cfg Config) (*Node, error) {
 	}
 	g := chain.Genesis{
 		Alloc:      cfg.GenesisAlloc,
+		BaseAlloc:  cfg.GenesisBaseAlloc,
 		Difficulty: cfg.Difficulty,
 		Timestamp:  genesisTS,
 	}
 	genesis := g.ToBlock()
-	n.chain = chain.NewChain(genesis, cfg.GenesisAlloc)
+	n.chain = chain.NewChainWithAlloc(genesis, cfg.GenesisAlloc, cfg.GenesisBaseAlloc)
 	n.chain.SetChainID(chainID)
 
 	if n.store != nil {
 		if err := n.store.PutGenesisAlloc(cfg.GenesisAlloc); err != nil {
+			_ = n.store.Close()
+			return nil, err
+		}
+		if err := n.store.PutGenesisBaseAlloc(cfg.GenesisBaseAlloc); err != nil {
 			_ = n.store.Close()
 			return nil, err
 		}

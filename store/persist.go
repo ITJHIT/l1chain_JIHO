@@ -34,11 +34,12 @@ func Save(s *Store, c *chain.Chain) error {
 }
 
 // Load reconstructs a chain.Chain from the store. It reloads the genesis block
-// (canonical height 0) via chain.NewChain — supplying the persisted genesis
-// allocation when present — then re-applies canonical blocks 1..N in height
-// order via Chain.AddBlock using wallet.Verify as the signature verifier, so the
-// reconstructed chain (head, height index, and derived state) matches the
-// original. It returns (nil, false, nil) when the store has no head recorded.
+// (canonical height 0) via chain.NewChainWithAlloc — supplying the persisted
+// genesis allocation and base-asset allocation when present — then re-applies
+// canonical blocks 1..N in height order via Chain.AddBlock using wallet.Verify
+// as the signature verifier, so the reconstructed chain (head, height index,
+// and derived state) matches the original. It returns (nil, false, nil) when
+// the store has no head recorded.
 func Load(s *Store) (*chain.Chain, bool, error) {
 	headHash, ok, err := s.GetHead()
 	if err != nil {
@@ -63,17 +64,16 @@ func Load(s *Store) (*chain.Chain, bool, error) {
 		return nil, false, fmt.Errorf("store: genesis block %s missing from blocks bucket", genHash.Hex())
 	}
 
-	alloc, haveAlloc, err := s.GetGenesisAlloc()
+	alloc, _, err := s.GetGenesisAlloc()
+	if err != nil {
+		return nil, false, err
+	}
+	baseAlloc, _, err := s.GetGenesisBaseAlloc()
 	if err != nil {
 		return nil, false, err
 	}
 
-	var c *chain.Chain
-	if haveAlloc {
-		c = chain.NewChain(genesis, alloc)
-	} else {
-		c = chain.NewChain(genesis)
-	}
+	c := chain.NewChainWithAlloc(genesis, alloc, baseAlloc)
 
 	headBlock, ok, err := s.GetBlock(headHash)
 	if err != nil {
