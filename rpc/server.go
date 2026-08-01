@@ -98,15 +98,18 @@ type TxJSON struct {
 
 // HeaderJSON is the wire representation of a core.Header. Hashes/addresses are
 // hex; the u64 fields that can grow large (Height, Nonce) are decimal strings.
+// ProposerSig is a hex string like Data/Signature on TxJSON -- empty for every
+// PoW block (M8), populated for a PoS block.
 type HeaderJSON struct {
-	Height     uint64 `json:"height,string"`
-	PrevHash   string `json:"prevHash"`
-	MerkleRoot string `json:"merkleRoot"`
-	StateRoot  string `json:"stateRoot"`
-	Coinbase   string `json:"coinbase"`
-	Timestamp  int64  `json:"timestamp"`
-	Difficulty uint32 `json:"difficulty"`
-	Nonce      uint64 `json:"nonce,string"`
+	Height      uint64 `json:"height,string"`
+	PrevHash    string `json:"prevHash"`
+	MerkleRoot  string `json:"merkleRoot"`
+	StateRoot   string `json:"stateRoot"`
+	Coinbase    string `json:"coinbase"`
+	Timestamp   int64  `json:"timestamp"`
+	Difficulty  uint32 `json:"difficulty"`
+	Nonce       uint64 `json:"nonce,string"`
+	ProposerSig string `json:"proposerSig"`
 }
 
 // BlockJSON is the hex-encoded wire representation of a core.Block.
@@ -286,14 +289,15 @@ func BlockToJSON(b core.Block) BlockJSON {
 	}
 	return BlockJSON{
 		Header: HeaderJSON{
-			Height:     b.Header.Height,
-			PrevHash:   b.Header.PrevHash.Hex(),
-			MerkleRoot: b.Header.MerkleRoot.Hex(),
-			StateRoot:  b.Header.StateRoot.Hex(),
-			Coinbase:   b.Header.Coinbase.Hex(),
-			Timestamp:  b.Header.Timestamp,
-			Difficulty: b.Header.Difficulty,
-			Nonce:      b.Header.Nonce,
+			Height:      b.Header.Height,
+			PrevHash:    b.Header.PrevHash.Hex(),
+			MerkleRoot:  b.Header.MerkleRoot.Hex(),
+			StateRoot:   b.Header.StateRoot.Hex(),
+			Coinbase:    b.Header.Coinbase.Hex(),
+			Timestamp:   b.Header.Timestamp,
+			Difficulty:  b.Header.Difficulty,
+			Nonce:       b.Header.Nonce,
+			ProposerSig: hex.EncodeToString(b.Header.ProposerSig),
 		},
 		Hash: b.Hash().Hex(),
 		Txs:  txs,
@@ -301,7 +305,8 @@ func BlockToJSON(b core.Block) BlockJSON {
 }
 
 // HeaderFromJSON reconstructs a core.Header from its wire form. It lets a client
-// recompute Header.Hash() from the returned fields (including Coinbase).
+// recompute Header.Hash() from the returned fields (including Coinbase and, for
+// a PoS block, ProposerSig -- Hash() folds it in as of M8, see core/block.go).
 func HeaderFromJSON(j HeaderJSON) (core.Header, error) {
 	prevHash, err := hashFromHex(j.PrevHash)
 	if err != nil {
@@ -319,15 +324,20 @@ func HeaderFromJSON(j HeaderJSON) (core.Header, error) {
 	if err != nil {
 		return core.Header{}, fmt.Errorf("coinbase: %w", err)
 	}
+	proposerSig, err := hexBytes(j.ProposerSig)
+	if err != nil {
+		return core.Header{}, fmt.Errorf("proposerSig: %w", err)
+	}
 	return core.Header{
-		Height:     j.Height,
-		PrevHash:   prevHash,
-		MerkleRoot: merkleRoot,
-		StateRoot:  stateRoot,
-		Coinbase:   coinbase,
-		Timestamp:  j.Timestamp,
-		Difficulty: j.Difficulty,
-		Nonce:      j.Nonce,
+		Height:      j.Height,
+		PrevHash:    prevHash,
+		MerkleRoot:  merkleRoot,
+		StateRoot:   stateRoot,
+		Coinbase:    coinbase,
+		Timestamp:   j.Timestamp,
+		Difficulty:  j.Difficulty,
+		Nonce:       j.Nonce,
+		ProposerSig: proposerSig,
 	}, nil
 }
 
