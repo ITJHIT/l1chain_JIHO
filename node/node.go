@@ -58,6 +58,19 @@ var (
 	// Refusing outright is deliberate -- silently continuing as PoW would start
 	// a node the caller believes is running PoS actually running PoW.
 	ErrConsensusModeNotPersisted = errors.New("node: PoS consensus mode is not yet persisted; cannot reload a PoS-configured node from an existing store")
+	// ErrNotPoSMode is returned by ProposeBlock when called on a node whose
+	// chain is not configured for PoS -- the PoS-mode counterpart to
+	// MineBlock, which has no equivalent guard since it is always valid.
+	ErrNotPoSMode = errors.New("node: ProposeBlock called on a non-PoS chain")
+	// ErrNotMyTurn is returned by ProposeBlock when this node's MinerKey
+	// address is not the validator pos.SelectProposer picked for the next
+	// height. Expected on nearly every call for nearly every validator --
+	// callers should treat it as a normal no-op, not log it as a failure.
+	ErrNotMyTurn = errors.New("node: not this node's turn to propose")
+	// ErrNoValidatorKey is returned by ProposeBlock when this node IS the
+	// selected proposer but Config.ValidatorBLSKey was never set, so there
+	// is no key to sign the header with.
+	ErrNoValidatorKey = errors.New("node: no BLS validator key configured")
 )
 
 // Config parameterizes a Node.
@@ -484,6 +497,15 @@ func (n *Node) MineBlock() (core.Block, error) {
 		return core.Block{}, errors.New("node: mining failed to find a nonce")
 	}
 
+	return n.commitBlock(blk, txs)
+}
+
+// commitBlock appends blk (already fully headered and, depending on mode,
+// PoW-mined or BLS-signed) via chain.AddBlock, drops its included txs from
+// the mempool, and re-saves the chain if persistent. The shared tail
+// MineBlock and ProposeBlock both use, so mempool-pruning/persistence logic
+// never has to be kept in sync by hand across the two block-production paths.
+func (n *Node) commitBlock(blk core.Block, txs []core.Transaction) (core.Block, error) {
 	if err := n.chain.AddBlock(blk, wallet.Verify); err != nil {
 		return core.Block{}, err
 	}
@@ -507,6 +529,67 @@ func (n *Node) MineBlock() (core.Block, error) {
 		}
 	}
 	return blk, nil
+}
+
+// ProposeBlock is the PoS-mode counterpart to MineBlock: instead of solving
+// PoW, it checks whether THIS node is the validator pos.SelectProposer
+// deterministically picked for the next height, and if so builds a candidate
+// block over Head() from the mempool via the exact same CandidateStateRoot
+// path MineBlock already uses (so proposing and validation agree on
+// StateRoot byte-for-byte, exactly as PoW mining and validation already do),
+// signs Header.SigningHash() with the node's own BLS validator key, and
+// commits it via the same commitBlock tail MineBlock uses.
+//
+// ErrNotMyTurn is the expected, non-error outcome on nearly every call for
+// nearly every validator -- see its own doc comment.
+func (n *Node) ProposeBlock() (core.Block, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.chain.ConsensusMode() != consensus.PoS {
+		return core.Block{}, ErrNotPoSMode
+	}
+
+	head := n.chain.Head()
+	headHash := head.Hash()
+	height := head.Header.Height + 1
+
+	active, total := n.chain.ValidatorSet().EffectiveStake(nil)
+	selected, err := pos.SelectProposer(active, total, pos.ProposerSeed(headHash, height))
+	if err != nil {
+		return core.Block{}, err
+	}
+	coinbase := n.miner.Address()
+	if selected.Address != coinbase {
+		return core.Block{}, ErrNotMyTurn
+	}
+	if n.validatorKey == (pos.Key{}) {
+		return core.Block{}, ErrNoValidatorKey
+	}
+
+	txs := make([]core.Transaction, len(n.mempool))
+	copy(txs, n.mempool)
+
+	stateRoot, err := n.deriveStateRoot(txs, coinbase)
+	if err != nil {
+		return core.Block{}, err
+	}
+
+	blk := core.Block{
+		Header: core.Header{
+			Height:    height,
+			PrevHash:  headHash,
+			Coinbase:  coinbase,
+			Timestamp: time.Now().Unix(),
+			StateRoot: stateRoot,
+		},
+		Txs: txs,
+	}
+	blk.Header.MerkleRoot = blk.TxRoot()
+	signingHash := blk.Header.SigningHash()
+	blk.Header.ProposerSig = n.validatorKey.Sign(signingHash[:], pos.DST(n.chainID))
+
+	return n.commitBlock(blk, txs)
 }
 
 // GetBlockByHeight returns the canonical block at height.
