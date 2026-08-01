@@ -202,10 +202,12 @@ func TestPoSWrongProposerBlockRejected(t *testing.T) {
 	if err := chainB.AddBlock(b, acceptAll); !errors.Is(err, ErrWrongProposer) {
 		t.Fatalf("chainB.AddBlock (wrong proposer) = %v, want ErrWrongProposer", err)
 	}
-	if chainA.Head().Hash() != gb.Hash() {
+	headA := chainA.Head()
+	if headA.Hash() != gb.Hash() {
 		t.Fatal("chainA head advanced on a wrong-proposer block")
 	}
-	if chainB.Head().Hash() != gb.Hash() {
+	headB := chainB.Head()
+	if headB.Hash() != gb.Hash() {
 		t.Fatal("chainB head advanced on a wrong-proposer block")
 	}
 }
