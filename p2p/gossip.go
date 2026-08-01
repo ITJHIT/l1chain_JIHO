@@ -12,6 +12,7 @@ import (
 	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/node"
+	"l1chain/pos"
 	"l1chain/store"
 	"l1chain/wallet"
 
@@ -105,20 +106,40 @@ func NewP2P(ctx context.Context, h host.Host) (*P2P, error) {
 // blockTopicValidator is the GossipSub ValidatorEx for the block topic. It is a
 // cheap, side-effect-free pre-propagation filter that runs during message
 // validation, before the message is relayed to the rest of the mesh: an
-// undecodable block, one whose hash does not meet its declared PoW target, or
-// one whose transaction merkle root does not match its header is REJECTED so it
-// is never forwarded (stopping network-wide amplification of junk/invalid
-// blocks). It intentionally performs NO state execution; full application-time
-// validation still happens in node.AcceptExternalBlock.
+// undecodable block, one whose transaction merkle root does not match its
+// header, or one that fails its consensus-mode-specific cheap check (below) is
+// REJECTED so it is never forwarded (stopping network-wide amplification of
+// junk/invalid blocks). It intentionally performs NO state execution; full
+// application-time validation still happens in node.AcceptExternalBlock.
+//
+// PoW vs PoS is told apart STRUCTURALLY (len(ProposerSig) > 0 -- see
+// core.Header.ProposerSig's own doc comment: empty for every PoW block,
+// forever), not by trusting a claimed mode, since this validator has no
+// chain/validator-set reference to consult (NewP2P's signature carries none --
+// threading one through would be a real, if modest, refactor deliberately
+// left out of this PR; see the M8 plan's own risk note). For a PoS-shaped
+// block the ONLY check possible here is therefore "is ProposerSig even the
+// right length for a real BLS signature" (pos.SignatureSize) -- genuinely
+// weaker anti-amplification defense than PoW's real MeetsTarget check, and
+// deliberately not dressed up as more than it is: real proposer-selection and
+// signature verification still happen, un-skippable, in
+// AcceptExternalBlock -> Chain.AddBlock (see chain.go's own doc comment,
+// "never trusted, always re-validated").
 func blockTopicValidator(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
 	b, err := store.DecodeBlock(msg.Data)
 	if err != nil {
 		return pubsub.ValidationReject
 	}
-	if !consensus.MeetsTarget(b.Hash(), b.Header.Difficulty) {
+	if b.TxRoot() != b.Header.MerkleRoot {
 		return pubsub.ValidationReject
 	}
-	if b.TxRoot() != b.Header.MerkleRoot {
+	if len(b.Header.ProposerSig) > 0 {
+		if len(b.Header.ProposerSig) != pos.SignatureSize {
+			return pubsub.ValidationReject
+		}
+		return pubsub.ValidationAccept
+	}
+	if !consensus.MeetsTarget(b.Hash(), b.Header.Difficulty) {
 		return pubsub.ValidationReject
 	}
 	return pubsub.ValidationAccept
