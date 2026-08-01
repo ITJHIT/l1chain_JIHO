@@ -13,7 +13,14 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/l1 ./cmd/l1
+# CGO_ENABLED=1 (M8): node/ now imports l1chain/pos for BLS12-381 validator
+# signing (github.com/supranational/blst), which is cgo + hand-written
+# assembly with no complete pure-Go fallback -- CGO_ENABLED=0 fails to build
+# it (a real CI failure found and fixed while wiring PoS in: blst's non-cgo
+# path is missing symbols the cgo path defines). golang:1.26's own build
+# image ships a C toolchain; debian:12-slim below has glibc, so the
+# dynamically-linked result still runs there.
+RUN CGO_ENABLED=1 go build -trimpath -o /out/l1 ./cmd/l1
 
 # debian:12-slim, not distroless: docker-compose.yml's multi-node demo needs
 # a shell (docker/entrypoint.sh) to discover a sibling's p2p peer ID via a

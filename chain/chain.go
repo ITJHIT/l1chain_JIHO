@@ -6,6 +6,7 @@ import (
 	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/exchange"
+	"l1chain/pos"
 	"l1chain/state"
 )
 
@@ -23,6 +24,12 @@ var (
 	// (CandidateStateRoot) and the validation path (AddBlock), so a tx signed for
 	// one chain can never be included in or accepted onto another.
 	ErrBadChainID = errors.New("chain: transaction chain id mismatch")
+	// ErrPoSRequiresValidators is returned by SetConsensusMode when switching
+	// to PoS without a non-empty validator set -- a PoS chain with no
+	// validators could never select a proposer, so this is rejected
+	// explicitly at configuration time rather than surfacing later as
+	// pos.ErrNoActiveValidators on the first mined block.
+	ErrPoSRequiresValidators = errors.New("chain: PoS consensus mode requires a non-empty validator set")
 )
 
 // DefaultChainID is the replay-protection domain used by genesis and every
@@ -63,6 +70,25 @@ type Chain struct {
 	// re-derive under a mode different from the one they were actually mined
 	// and validated under.
 	exchangeMode exchange.Mode
+
+	// consensusMode selects PoW (the zero value, unchanged since M1) or PoS
+	// (M8, additive) for this chain's entire lifetime. Like chainID/
+	// exchangeMode, it is meant to be set once, immediately after
+	// NewChain(WithAlloc), and never touched again: deriveState replays the
+	// WHOLE chain from genesis under whatever mode is current at replay
+	// time, so changing it after blocks exist would make historical blocks
+	// re-derive under a mode different from the one they were actually
+	// produced and validated under.
+	//
+	// NOT YET consulted by AddBlock/CandidateStateRoot as of this PR -- PoW
+	// behavior is completely unaffected until the wiring PR that follows
+	// this one (see the M8 plan's PR5).
+	consensusMode consensus.Mode
+	// validatorSet is nil for a PoW chain; for a PoS chain it is the
+	// genesis-fixed validator registry SetConsensusMode was given (see
+	// pos.ValidatorSet's own doc comment for why M8 scopes this as
+	// immutable, genesis-only config -- no live deposit/exit path exists).
+	validatorSet *pos.ValidatorSet
 }
 
 // SetExchangeMode sets the matching mode every block's exchange transactions
@@ -72,6 +98,27 @@ func (c *Chain) SetExchangeMode(m exchange.Mode) { c.exchangeMode = m }
 
 // ExchangeMode returns the currently configured exchange matching mode.
 func (c *Chain) ExchangeMode() exchange.Mode { return c.exchangeMode }
+
+// SetConsensusMode selects PoW or PoS for this chain's entire lifetime. See
+// the consensusMode field comment for why this must be called once, before
+// mining begins, and never changed afterward. Rejects PoS with an empty
+// validator set (see ErrPoSRequiresValidators). Not yet consulted by
+// AddBlock/CandidateStateRoot as of this PR.
+func (c *Chain) SetConsensusMode(mode consensus.Mode, vs *pos.ValidatorSet) error {
+	if mode == consensus.PoS && (vs == nil || vs.Len() == 0) {
+		return ErrPoSRequiresValidators
+	}
+	c.consensusMode = mode
+	c.validatorSet = vs
+	return nil
+}
+
+// ConsensusMode returns the chain's configured consensus mode (PoW, the zero
+// value, unless SetConsensusMode was called).
+func (c *Chain) ConsensusMode() consensus.Mode { return c.consensusMode }
+
+// ValidatorSet returns the chain's validator set, or nil for a PoW chain.
+func (c *Chain) ValidatorSet() *pos.ValidatorSet { return c.validatorSet }
 
 // NewChain creates a chain seeded with the genesis block. The optional alloc is
 // the genesis allocation (same map given to ApplyGenesis); it is required for

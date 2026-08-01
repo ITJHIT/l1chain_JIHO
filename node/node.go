@@ -21,6 +21,7 @@ import (
 	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/exchange"
+	"l1chain/pos"
 	"l1chain/state"
 	"l1chain/store"
 	"l1chain/wallet"
@@ -50,6 +51,13 @@ var (
 	// CandidateStateRoot); rejecting here keeps replayed foreign-chain txs out of
 	// the mempool so they can never poison mining.
 	ErrBadChainID = errors.New("node: transaction chain id mismatch")
+	// ErrConsensusModeNotPersisted is returned by New when Config.ConsensusMode
+	// is PoS but an existing chain is being loaded from the store: consensus
+	// mode/validator set are not yet persisted (see the M8 plan), so a reloaded
+	// chain has no way to recover which validator set it was configured with.
+	// Refusing outright is deliberate -- silently continuing as PoW would start
+	// a node the caller believes is running PoS actually running PoW.
+	ErrConsensusModeNotPersisted = errors.New("node: PoS consensus mode is not yet persisted; cannot reload a PoS-configured node from an existing store")
 )
 
 // Config parameterizes a Node.
@@ -84,6 +92,27 @@ type Config struct {
 	// agree, and SubmitTx rejects txs carrying a different ChainID with
 	// ErrBadChainID.
 	ChainID uint64
+	// ConsensusMode selects PoW (the zero value, default, unchanged since M1)
+	// or PoS (M8, additive) for this node's chain -- threaded directly into
+	// chain.Chain.SetConsensusMode, mirroring how ChainID is threaded into
+	// SetChainID (NOT via chain.Genesis, which has no ChainID field either --
+	// mode/id config that never touches genesis STATE is threaded straight
+	// from Config to the matching Chain setter, bypassing Genesis entirely).
+	// Ignored (must be PoW, or New returns ErrConsensusModeNotPersisted) when
+	// an existing chain is loaded from the store: consensus mode is not yet
+	// persisted (see the M8 plan) -- refusing to silently continue as PoW is
+	// deliberate, not an oversight.
+	ConsensusMode consensus.Mode
+	// Validators is the genesis-fixed validator set for a PoS chain (ignored
+	// for PoW). Required (non-empty, each entry valid) when ConsensusMode ==
+	// consensus.PoS -- see pos.NewValidatorSet's own validation.
+	Validators []pos.ValidatorInfo
+	// ValidatorBLSKey is this node's own BLS consensus-signing key (distinct
+	// from MinerKey's secp256k1 tx-signing/coinbase key -- see pos.Key's own
+	// doc comment for why PoS uses a second key type). A zero Key means this
+	// node only follows/validates PoS blocks, never proposes or attests,
+	// mirroring MinerKey's own "zero key = read-only" convention.
+	ValidatorBLSKey pos.Key
 }
 
 // DefaultMaxMempool is the mempool size cap used when Config.MaxMempool <= 0.
@@ -102,14 +131,15 @@ type Node struct {
 	// write lock; Head/Balance/Nonce/GetBlockByHeight/GetTxByHash/MempoolLen
 	// take the read lock. deriveStateRoot's mutate-then-restore of the shared
 	// canonical state runs entirely under the write lock held by MineBlock.
-	mu         sync.RWMutex
-	chain      *chain.Chain
-	store      *store.Store
-	mempool    []core.Transaction
-	maxMempool int
-	miner      wallet.Key
-	Difficulty uint32
-	chainID    uint64
+	mu           sync.RWMutex
+	chain        *chain.Chain
+	store        *store.Store
+	mempool      []core.Transaction
+	maxMempool   int
+	miner        wallet.Key
+	Difficulty   uint32
+	chainID      uint64
+	validatorKey pos.Key // zero value: this node never proposes/attests PoS blocks
 
 	alloc     map[core.Address]uint64
 	baseAlloc map[core.Address]uint64
@@ -151,6 +181,10 @@ func New(cfg Config) (*Node, error) {
 		if ok {
 			n.chain = c
 			n.chain.SetChainID(chainID)
+			if cfg.ConsensusMode == consensus.PoS {
+				_ = s.Close()
+				return nil, ErrConsensusModeNotPersisted
+			}
 			// Recover the genesis alloc so re-saves stay faithful.
 			if alloc, have, err := s.GetGenesisAlloc(); err == nil && have {
 				n.alloc = alloc
@@ -176,6 +210,22 @@ func New(cfg Config) (*Node, error) {
 	genesis := g.ToBlock()
 	n.chain = chain.NewChainWithAlloc(genesis, cfg.GenesisAlloc, cfg.GenesisBaseAlloc)
 	n.chain.SetChainID(chainID)
+	if cfg.ConsensusMode == consensus.PoS {
+		vs, err := pos.NewValidatorSet(cfg.Validators)
+		if err != nil {
+			if n.store != nil {
+				_ = n.store.Close()
+			}
+			return nil, err
+		}
+		if err := n.chain.SetConsensusMode(consensus.PoS, vs); err != nil {
+			if n.store != nil {
+				_ = n.store.Close()
+			}
+			return nil, err
+		}
+	}
+	n.validatorKey = cfg.ValidatorBLSKey
 
 	if n.store != nil {
 		if err := n.store.PutGenesisAlloc(cfg.GenesisAlloc); err != nil {
@@ -204,6 +254,14 @@ func (n *Node) Close() error {
 
 // MinerAddress returns the node's coinbase/miner address.
 func (n *Node) MinerAddress() core.Address { return n.miner.Address() }
+
+// ConsensusMode returns the node's configured consensus mode (PoW, the zero
+// value, unless Config.ConsensusMode was PoS).
+func (n *Node) ConsensusMode() consensus.Mode {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.chain.ConsensusMode()
+}
 
 // Head returns the canonical head block.
 func (n *Node) Head() core.Block {
