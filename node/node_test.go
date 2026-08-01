@@ -304,13 +304,16 @@ func TestReplayAcrossChainIDRejected(t *testing.T) {
 	}
 }
 
-func testValidatorInfo(t *testing.T, addr core.Address, stake uint64) pos.ValidatorInfo {
+// testValidatorInfo returns a fresh validator registration and the real BLS
+// key behind it, so callers that need to actually propose/sign PoS blocks
+// (not just pass config validation) can configure Config.ValidatorBLSKey.
+func testValidatorInfo(t *testing.T, addr core.Address, stake uint64) (pos.ValidatorInfo, pos.Key) {
 	t.Helper()
 	k, err := pos.NewKey()
 	if err != nil {
 		t.Fatalf("pos.NewKey: %v", err)
 	}
-	return pos.ValidatorInfo{Address: addr, BLSPubKey: k.PubKey(), Stake: stake}
+	return pos.ValidatorInfo{Address: addr, BLSPubKey: k.PubKey(), Stake: stake}, k
 }
 
 func TestNewDefaultsToPoWConsensusMode(t *testing.T) {
@@ -331,7 +334,8 @@ func TestNewDefaultsToPoWConsensusMode(t *testing.T) {
 
 func TestNewWithPoSConsensusModeAndValidators(t *testing.T) {
 	a := newKeyT(t)
-	validators := []pos.ValidatorInfo{testValidatorInfo(t, addr(1), 100)}
+	info, _ := testValidatorInfo(t, addr(1), 100)
+	validators := []pos.ValidatorInfo{info}
 	n, err := New(Config{
 		MinerKey:      newKeyT(t),
 		Difficulty:    testDifficulty,
@@ -380,7 +384,8 @@ func TestReloadRejectsPoSConsensusMode(t *testing.T) {
 		t.Fatalf("Close(1): %v", err)
 	}
 
-	validators := []pos.ValidatorInfo{testValidatorInfo(t, addr(1), 100)}
+	info, _ := testValidatorInfo(t, addr(1), 100)
+	validators := []pos.ValidatorInfo{info}
 	_, err = New(Config{
 		DBPath:        dbPath,
 		MinerKey:      miner,
@@ -391,5 +396,120 @@ func TestReloadRejectsPoSConsensusMode(t *testing.T) {
 	})
 	if !errors.Is(err, ErrConsensusModeNotPersisted) {
 		t.Fatalf("New(reload, PoS) = %v, want ErrConsensusModeNotPersisted", err)
+	}
+}
+
+func TestProposeBlockRejectsOnPoWChain(t *testing.T) {
+	a := newKeyT(t)
+	n, err := New(Config{
+		MinerKey:     newKeyT(t),
+		Difficulty:   testDifficulty,
+		GenesisAlloc: map[core.Address]uint64{a.Address(): 1000},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+	if _, err := n.ProposeBlock(); !errors.Is(err, ErrNotPoSMode) {
+		t.Fatalf("ProposeBlock on a PoW chain = %v, want ErrNotPoSMode", err)
+	}
+}
+
+// TestProposeBlockBuildsAndCommitsWhenSelected drives the real, full
+// production path (Node.ProposeBlock, not the lower-level chain.AddBlock
+// directly) end to end: a single-validator PoS chain where this node's own
+// MinerKey address IS that validator (so it is selected for every height,
+// avoiding the need to simulate multiple nodes/turns), with a real
+// ValidatorBLSKey configured to sign with.
+func TestProposeBlockBuildsAndCommitsWhenSelected(t *testing.T) {
+	miner := newKeyT(t)
+	a := newKeyT(t)
+	info, blsKey := testValidatorInfo(t, miner.Address(), 100)
+	n, err := New(Config{
+		MinerKey:        miner,
+		GenesisAlloc:    map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode:   consensus.PoS,
+		Validators:      []pos.ValidatorInfo{info},
+		ValidatorBLSKey: blsKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	if err := n.SubmitTx(signedTransfer(a, miner.Address(), 100, 0)); err != nil {
+		t.Fatalf("SubmitTx: %v", err)
+	}
+
+	blk, err := n.ProposeBlock()
+	if err != nil {
+		t.Fatalf("ProposeBlock: %v", err)
+	}
+	if got := blk.Header.Height; got != 1 {
+		t.Fatalf("proposed block height = %d, want 1", got)
+	}
+	if got := blk.Header.Coinbase; got != miner.Address() {
+		t.Fatalf("proposed block coinbase = %x, want %x", got, miner.Address())
+	}
+	if len(blk.Header.ProposerSig) == 0 {
+		t.Fatal("proposed block carries no ProposerSig")
+	}
+	if got := n.Head().Header.Height; got != 1 {
+		t.Fatalf("node head height = %d, want 1 (ProposeBlock must commit via AddBlock)", got)
+	}
+	if got := n.Balance(miner.Address()); got != 100+chain.BlockReward {
+		t.Fatalf("miner balance = %d, want %d (the included transfer plus the block reward, since the miner is also this block's coinbase)", got, 100+chain.BlockReward)
+	}
+}
+
+// TestProposeBlockReturnsNotMyTurnWhenNotSelected configures a node whose own
+// MinerKey address is NOT in the PoS validator set at all, so it can never be
+// selected -- ProposeBlock must return ErrNotMyTurn, not attempt to build or
+// sign anything.
+func TestProposeBlockReturnsNotMyTurnWhenNotSelected(t *testing.T) {
+	miner := newKeyT(t) // NOT a validator
+	a := newKeyT(t)
+	info, _ := testValidatorInfo(t, addr(1), 100) // a different address entirely
+	n, err := New(Config{
+		MinerKey:      miner,
+		GenesisAlloc:  map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode: consensus.PoS,
+		Validators:    []pos.ValidatorInfo{info},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	if _, err := n.ProposeBlock(); !errors.Is(err, ErrNotMyTurn) {
+		t.Fatalf("ProposeBlock (not a validator) = %v, want ErrNotMyTurn", err)
+	}
+	if got := n.Head().Header.Height; got != 0 {
+		t.Fatalf("node head height = %d, want 0 (no block should have been produced)", got)
+	}
+}
+
+// TestProposeBlockRejectsWithNoValidatorKey configures a node whose MinerKey
+// IS the sole validator (so it WOULD be selected), but never sets
+// ValidatorBLSKey -- ProposeBlock must fail cleanly with ErrNoValidatorKey
+// rather than panic signing with a nil key.
+func TestProposeBlockRejectsWithNoValidatorKey(t *testing.T) {
+	miner := newKeyT(t)
+	a := newKeyT(t)
+	info, _ := testValidatorInfo(t, miner.Address(), 100)
+	n, err := New(Config{
+		MinerKey:      miner,
+		GenesisAlloc:  map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode: consensus.PoS,
+		Validators:    []pos.ValidatorInfo{info},
+		// ValidatorBLSKey deliberately left zero.
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	if _, err := n.ProposeBlock(); !errors.Is(err, ErrNoValidatorKey) {
+		t.Fatalf("ProposeBlock (no validator key) = %v, want ErrNoValidatorKey", err)
 	}
 }

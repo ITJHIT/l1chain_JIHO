@@ -30,6 +30,14 @@ var (
 	// explicitly at configuration time rather than surfacing later as
 	// pos.ErrNoActiveValidators on the first mined block.
 	ErrPoSRequiresValidators = errors.New("chain: PoS consensus mode requires a non-empty validator set")
+	// ErrWrongProposer is returned by AddBlock (PoS mode) when a block's
+	// Coinbase is not the validator pos.SelectProposer deterministically
+	// picked for that height -- the PoS analog of ErrBadPoW.
+	ErrWrongProposer = errors.New("chain: block proposer is not the selected validator for this height")
+	// ErrBadProposerSig is returned by AddBlock (PoS mode) when a block's
+	// ProposerSig does not verify against the selected proposer's BLS
+	// public key over the header's own SigningHash.
+	ErrBadProposerSig = errors.New("chain: invalid proposer BLS signature")
 )
 
 // DefaultChainID is the replay-protection domain used by genesis and every
@@ -293,8 +301,8 @@ func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address
 }
 
 // AddBlock validates and stores b, performing a reorg if b's branch becomes the
-// heaviest. Validation covers parent linkage, height, PoW, tx merkle root, and
-// re-derived state root.
+// heaviest. Validation covers parent linkage, height, PoW (or, in PoS mode,
+// proposer-selection + BLS signature), tx merkle root, and re-derived state root.
 func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) error {
 	hash := b.Hash()
 	if _, exists := c.blocks[hash]; exists {
@@ -307,9 +315,41 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	if b.Header.Height != parent.Header.Height+1 {
 		return ErrBadHeight
 	}
-	if !consensus.MeetsTarget(hash, b.Header.Difficulty) {
-		return ErrBadPoW
+
+	// weight is this block's contribution to cumulative "difficulty" (c.td),
+	// the sole input to the reorg decision below. PoW blocks contribute their
+	// real Difficulty, exactly as before M8. PoS blocks always carry
+	// Difficulty == 0 (see core.Header's own doc comment -- it is genuinely
+	// unused in PoS mode, not repurposed), so reusing it here would freeze
+	// c.td at 0 forever and the reorg check below would never advance the
+	// canonical head past genesis. Instead every accepted PoS block
+	// contributes weight 1 -- a simple longest-valid-chain rule, which is
+	// the correct fork-choice for a chain where pos.SelectProposer already
+	// guarantees at most one legitimately-signed block per height; the only
+	// way a real fork arises is a validator equivocating (double-proposing),
+	// which PR7 detects and jails rather than resolving via block weight.
+	var weight uint64
+	if c.consensusMode == consensus.PoS {
+		active, total := c.validatorSet.EffectiveStake(nil)
+		selected, err := pos.SelectProposer(active, total, pos.ProposerSeed(b.Header.PrevHash, b.Header.Height))
+		if err != nil {
+			return err
+		}
+		if b.Header.Coinbase != selected.Address {
+			return ErrWrongProposer
+		}
+		signingHash := b.Header.SigningHash()
+		if !pos.Verify(selected.BLSPubKey, signingHash[:], b.Header.ProposerSig, pos.DST(c.chainID)) {
+			return ErrBadProposerSig
+		}
+		weight = 1
+	} else {
+		if !consensus.MeetsTarget(hash, b.Header.Difficulty) {
+			return ErrBadPoW
+		}
+		weight = uint64(b.Header.Difficulty)
 	}
+
 	if b.TxRoot() != b.Header.MerkleRoot {
 		return ErrBadTxRoot
 	}
@@ -329,9 +369,9 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 		return ErrBadStateRoot
 	}
 
-	// Commit the block and its cumulative difficulty.
+	// Commit the block and its cumulative weight.
 	c.blocks[hash] = b
-	c.td[hash] = c.td[b.Header.PrevHash] + uint64(b.Header.Difficulty)
+	c.td[hash] = c.td[b.Header.PrevHash] + weight
 
 	// Reorg: adopt the strictly heaviest branch as the canonical head.
 	if c.td[hash] > c.td[c.head] {
