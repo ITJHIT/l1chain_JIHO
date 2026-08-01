@@ -375,3 +375,131 @@ func TestPoSBelowTwoThirdsStakeDoesNotFinalize(t *testing.T) {
 		t.Fatalf("FinalizedHeight() after crossing 2/3 = %d, want %d", got, pos.CheckpointInterval)
 	}
 }
+
+// TestPoSDoubleProposeDetectedAndJailed is PR7's own required test: a
+// validator that proposes TWO DIFFERENT, individually valid blocks for the
+// SAME parent (equivocation) is jailed after the second one is accepted --
+// and, critically, the jailing actually changes future proposer eligibility
+// (EffectiveValidatorSet), not just a flag nobody checks.
+func TestPoSDoubleProposeDetectedAndJailed(t *testing.T) {
+	sender := addr(1)
+	alloc := map[core.Address]uint64{sender: 10_000_000}
+	vs, keys := posTestValidators(t)
+
+	g := Genesis{Alloc: alloc, Difficulty: 0, Timestamp: 0}
+	gb := g.ToBlock()
+	c := NewChain(gb, alloc)
+	if err := c.SetConsensusMode(consensus.PoS, vs); err != nil {
+		t.Fatalf("SetConsensusMode: %v", err)
+	}
+
+	active, total := vs.EffectiveStake(nil)
+	selected, err := pos.SelectProposer(active, total, pos.ProposerSeed(gb.Hash(), 1))
+	if err != nil {
+		t.Fatalf("SelectProposer: %v", err)
+	}
+
+	// Two DIFFERENT blocks, same parent, same height, same (real, correctly
+	// selected) proposer -- differing in which tx they carry, so their
+	// hashes differ, but both are individually valid PoS blocks.
+	b1 := proposePoSBlock(t, c, vs, keys, gb, nil)
+	tx := core.Transaction{From: sender, To: addr(99), Value: 1, Nonce: 0, ChainID: c.ChainID(), Signature: []byte{1}}
+	b2 := proposePoSBlock(t, c, vs, keys, gb, []core.Transaction{tx})
+
+	if b1.Hash() == b2.Hash() {
+		t.Fatal("test setup: b1 and b2 must be distinct blocks")
+	}
+	if b1.Header.Coinbase != selected.Address || b2.Header.Coinbase != selected.Address {
+		t.Fatalf("test setup: both blocks must come from the same selected proposer %x", selected.Address)
+	}
+
+	if err := c.AddBlock(b1, acceptAll); err != nil {
+		t.Fatalf("AddBlock b1: %v", err)
+	}
+	if c.Jailed(selected.Address) {
+		t.Fatal("validator jailed after only ONE proposal -- must take two conflicting ones")
+	}
+
+	if err := c.AddBlock(b2, acceptAll); err != nil {
+		t.Fatalf("AddBlock b2 (double-propose, same parent as b1): %v", err)
+	}
+	if !c.Jailed(selected.Address) {
+		t.Fatal("double-proposing validator was not jailed")
+	}
+
+	// The jailed validator must actually be excluded from FUTURE proposer
+	// selection -- not just flagged.
+	activeAfter, totalAfter := c.EffectiveValidatorSet()
+	for _, v := range activeAfter {
+		if v.Address == selected.Address {
+			t.Fatal("jailed validator still present in EffectiveValidatorSet")
+		}
+	}
+	if want := total - selected.Stake; totalAfter != want {
+		t.Fatalf("EffectiveValidatorSet total stake = %d, want %d (jailed validator's stake excluded)", totalAfter, want)
+	}
+}
+
+// TestPoSDoubleAttestDetectedAndJailed is PR7's own required test: a
+// validator that casts two CONFLICTING attestation votes for the same
+// checkpoint round is jailed, the conflicting (second) vote is never
+// tallied, and the jailing changes future EffectiveValidatorSet membership.
+func TestPoSDoubleAttestDetectedAndJailed(t *testing.T) {
+	sender := addr(1)
+	alloc := map[core.Address]uint64{sender: 10_000_000}
+	vs, keys := posTestValidators(t)
+
+	g := Genesis{Alloc: alloc, Difficulty: 0, Timestamp: 0}
+	gb := g.ToBlock()
+	c := NewChain(gb, alloc)
+	if err := c.SetConsensusMode(consensus.PoS, vs); err != nil {
+		t.Fatalf("SetConsensusMode: %v", err)
+	}
+
+	parent := gb
+	var checkpointBlock core.Block
+	for h := uint64(1); h <= pos.CheckpointInterval; h++ {
+		b := proposePoSBlock(t, c, vs, keys, parent, nil)
+		if err := c.AddBlock(b, acceptAll); err != nil {
+			t.Fatalf("block %d: %v", h, err)
+		}
+		checkpointBlock = b
+		parent = b
+	}
+	realHash := checkpointBlock.Hash()
+	fakeHash := core.SumHash([]byte("a different, conflicting checkpoint claim"))
+
+	validator := addr(10) // stake 10, per posTestValidators
+	tx1 := attestTx(c.ChainID(), validator, 0, keys[validator], pos.CheckpointInterval, realHash)
+	b1 := proposePoSBlock(t, c, vs, keys, parent, []core.Transaction{tx1})
+	if err := c.AddBlock(b1, acceptAll); err != nil {
+		t.Fatalf("attest block 1 (real hash): %v", err)
+	}
+	if c.Jailed(validator) {
+		t.Fatal("validator jailed after only ONE attestation -- must take two conflicting ones")
+	}
+
+	tx2 := attestTx(c.ChainID(), validator, 1, keys[validator], pos.CheckpointInterval, fakeHash)
+	b2 := proposePoSBlock(t, c, vs, keys, b1, []core.Transaction{tx2})
+	if err := c.AddBlock(b2, acceptAll); err != nil {
+		t.Fatalf("attest block 2 (conflicting fake hash): %v", err)
+	}
+	if !c.Jailed(validator) {
+		t.Fatal("double-attesting validator was not jailed")
+	}
+
+	// The conflicting second vote must not have been tallied -- with only
+	// this one validator's (10/100) stake ever legitimately counted, nothing
+	// should have finalized.
+	if got := c.FinalizedHash(); !got.IsZero() {
+		t.Fatalf("finalized on a conflicting/fabricated attestation: height=%d hash=%x", c.FinalizedHeight(), got)
+	}
+
+	// The jailed validator must be excluded from future EffectiveValidatorSet.
+	activeAfter, _ := c.EffectiveValidatorSet()
+	for _, v := range activeAfter {
+		if v.Address == validator {
+			t.Fatal("jailed validator still present in EffectiveValidatorSet")
+		}
+	}
+}

@@ -128,6 +128,27 @@ type Chain struct {
 	checkpointStake map[core.Hash]uint64
 	finalizedHash   core.Hash
 	finalizedHeight uint64
+
+	// jailed is the set of validators excluded from future proposer
+	// selection (EffectiveValidatorSet) and future attestation tallying
+	// (recordAttestations) after a detected equivocation -- double-propose
+	// (proposedAtHeight) or double-attest (attestedRound's own conflicting-
+	// vote check). PERMANENT once set, like the finality fields above:
+	// jailing is a consequence of on-chain evidence (two conflicting
+	// signatures), not a judgment call that could later be reversed by a
+	// different branch winning out. No economic penalty (stake burn/
+	// seizure) -- see the M8 plan's own scope decision: stake is immutable
+	// genesis config, not a mutable balance, so there is nothing to seize.
+	jailed map[core.Address]bool
+	// proposedAtHeight tracks, for a given PARENT hash (a (PrevHash,
+	// Height) slot -- Height is redundant given PrevHash, since AddBlock's
+	// own height check pins it to parent.Height+1), which hash each
+	// validator has already proposed. A validator producing a SECOND,
+	// DIFFERENT block for the SAME parent is equivocation (double-propose).
+	// Producing legitimately different blocks on two genuinely different
+	// parents is an ordinary fork (the same thing a PoW chain already
+	// tolerates) and must never be conflated with equivocation.
+	proposedAtHeight map[core.Hash]map[core.Address]core.Hash
 }
 
 // SetExchangeMode sets the matching mode every block's exchange transactions
@@ -141,8 +162,7 @@ func (c *Chain) ExchangeMode() exchange.Mode { return c.exchangeMode }
 // SetConsensusMode selects PoW or PoS for this chain's entire lifetime. See
 // the consensusMode field comment for why this must be called once, before
 // mining begins, and never changed afterward. Rejects PoS with an empty
-// validator set (see ErrPoSRequiresValidators). Not yet consulted by
-// AddBlock/CandidateStateRoot as of this PR.
+// validator set (see ErrPoSRequiresValidators).
 func (c *Chain) SetConsensusMode(mode consensus.Mode, vs *pos.ValidatorSet) error {
 	if mode == consensus.PoS && (vs == nil || vs.Len() == 0) {
 		return ErrPoSRequiresValidators
@@ -169,6 +189,22 @@ func (c *Chain) FinalizedHeight() uint64 { return c.finalizedHeight }
 // FinalizedHash returns the hash of the most recently finalized PoS
 // checkpoint, or the zero Hash if none has finalized yet.
 func (c *Chain) FinalizedHash() core.Hash { return c.finalizedHash }
+
+// Jailed reports whether addr has been excluded from future PoS proposer
+// selection and attestation tallying due to a detected equivocation
+// (double-propose or double-attest). Always false for a PoW chain.
+func (c *Chain) Jailed(addr core.Address) bool { return c.jailed[addr] }
+
+// EffectiveValidatorSet returns the chain's currently active (non-jailed)
+// validators and their combined stake -- the SAME view AddBlock's own
+// proposer-selection check uses, so a caller building a candidate block
+// (see node.Node.ProposeBlock) always agrees with what AddBlock will
+// independently re-derive when validating it. Panics if called on a
+// non-PoS chain (nil validatorSet); callers must check ConsensusMode first,
+// exactly like every other PoS-only accessor in this package.
+func (c *Chain) EffectiveValidatorSet() ([]pos.ValidatorInfo, uint64) {
+	return c.validatorSet.EffectiveStake(c.jailed)
+}
 
 // NewChain creates a chain seeded with the genesis block. The optional alloc is
 // the genesis allocation (same map given to ApplyGenesis); it is required for
@@ -197,12 +233,14 @@ func NewChain(genesis core.Block, alloc ...map[core.Address]uint64) *Chain {
 // already disagree with headState's root by the time it ran.
 func NewChainWithAlloc(genesis core.Block, alloc, baseAlloc map[core.Address]uint64) *Chain {
 	c := &Chain{
-		blocks:          make(map[core.Hash]core.Block),
-		td:              make(map[core.Hash]uint64),
-		heightIndex:     make(map[uint64]core.Hash),
-		chainID:         DefaultChainID,
-		attestedRound:   make(map[uint64]map[core.Address]core.Hash),
-		checkpointStake: make(map[core.Hash]uint64),
+		blocks:           make(map[core.Hash]core.Block),
+		td:               make(map[core.Hash]uint64),
+		heightIndex:      make(map[uint64]core.Hash),
+		chainID:          DefaultChainID,
+		attestedRound:    make(map[uint64]map[core.Address]core.Hash),
+		checkpointStake:  make(map[core.Hash]uint64),
+		jailed:           make(map[core.Address]bool),
+		proposedAtHeight: make(map[core.Hash]map[core.Address]core.Hash),
 	}
 	c.genesisAlloc = alloc
 	c.genesisBaseAlloc = baseAlloc
@@ -417,10 +455,17 @@ func (c *Chain) verifyAttestations(b core.Block) error {
 // recordAttestations tallies every (already-verified, by verifyAttestations
 // before b was ever committed) attestation tx in b into c.checkpointStake,
 // and advances c.finalizedHash/finalizedHeight once a target crosses 2/3 of
-// the validator set's total stake. Called AFTER b is committed, unconditionally
-// of whether b becomes the new canonical head -- attestations are tallied
-// permanently and globally, independent of canonicalness, which is what
-// makes finality survive a later reorg away from the branch that carried them.
+// the EFFECTIVE (non-jailed) validator set's total stake. Called AFTER b is
+// committed, unconditionally of whether b becomes the new canonical head --
+// attestations are tallied permanently and globally, independent of
+// canonicalness, which is what makes finality survive a later reorg away
+// from the branch that carried them.
+//
+// A validator's SECOND, CONFLICTING vote for an already-voted round is
+// equivocation (double-attest): it is never tallied, and it jails the
+// validator (see the jailed field's own doc comment) -- from that point on,
+// EffectiveValidatorSet excludes them, so a later vote from them (even a
+// first-seen-this-round one) is also skipped.
 func (c *Chain) recordAttestations(b core.Block) {
 	for i := range b.Txs {
 		tx := b.Txs[i]
@@ -439,22 +484,43 @@ func (c *Chain) recordAttestations(b core.Block) {
 		if c.attestedRound[round] == nil {
 			c.attestedRound[round] = make(map[core.Address]core.Hash)
 		}
-		if _, voted := c.attestedRound[round][tx.From]; voted {
-			// Already recorded a vote (matching or conflicting) for this
-			// round from this validator -- do not tally again. A
-			// conflicting second vote is equivocation; PR7 detects and
-			// jails it. Here, not double-tallying is what keeps the 2/3
-			// threshold mathematically sound.
+		if existing, voted := c.attestedRound[round][tx.From]; voted {
+			if existing != targetHash {
+				c.jailed[tx.From] = true
+			}
 			continue
+		}
+		if c.jailed[tx.From] {
+			continue // a jailed validator's vote never counts, even a first-seen-this-round one
 		}
 		c.attestedRound[round][tx.From] = targetHash
 		c.checkpointStake[targetHash] += validator.Stake
 
-		if targetHeight > c.finalizedHeight && c.checkpointStake[targetHash]*3 >= c.validatorSet.TotalStake()*2 {
+		_, effectiveTotal := c.EffectiveValidatorSet()
+		if targetHeight > c.finalizedHeight && c.checkpointStake[targetHash]*3 >= effectiveTotal*2 {
 			c.finalizedHash = targetHash
 			c.finalizedHeight = targetHeight
 		}
 	}
+}
+
+// detectEquivocation checks whether b.Header.Coinbase has already proposed a
+// DIFFERENT block for this same parent (see proposedAtHeight's own doc
+// comment for why "same parent," not merely "same height") -- if so, jails
+// the validator. Called AFTER b is committed, mirroring recordAttestations'
+// own "permanent regardless of canonicalness" timing: equivocation must be
+// remembered even if this specific block never becomes canonical.
+func (c *Chain) detectEquivocation(b core.Block, hash core.Hash) {
+	if c.proposedAtHeight[b.Header.PrevHash] == nil {
+		c.proposedAtHeight[b.Header.PrevHash] = make(map[core.Address]core.Hash)
+	}
+	if existing, proposed := c.proposedAtHeight[b.Header.PrevHash][b.Header.Coinbase]; proposed {
+		if existing != hash {
+			c.jailed[b.Header.Coinbase] = true
+		}
+		return
+	}
+	c.proposedAtHeight[b.Header.PrevHash][b.Header.Coinbase] = hash
 }
 
 // AddBlock validates and stores b, performing a reorg if b's branch becomes the
@@ -491,7 +557,7 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	// which PR7 detects and jails rather than resolving via block weight.
 	var weight uint64
 	if c.consensusMode == consensus.PoS {
-		active, total := c.validatorSet.EffectiveStake(nil)
+		active, total := c.EffectiveValidatorSet()
 		selected, err := pos.SelectProposer(active, total, pos.ProposerSeed(b.Header.PrevHash, b.Header.Height))
 		if err != nil {
 			return err
@@ -537,10 +603,12 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	c.blocks[hash] = b
 	c.td[hash] = c.td[b.Header.PrevHash] + weight
 	if c.consensusMode == consensus.PoS {
-		// Tallied permanently, independent of which branch ends up
-		// canonical below -- see recordAttestations' own doc comment for
-		// why that permanence is what makes finality survive a reorg.
+		// Both tallied/detected permanently, independent of which branch
+		// ends up canonical below -- see recordAttestations/
+		// detectEquivocation's own doc comments for why that permanence is
+		// what makes finality and jailing survive a reorg.
 		c.recordAttestations(b)
+		c.detectEquivocation(b, hash)
 	}
 
 	// Reorg: adopt the strictly heaviest branch as the canonical head.

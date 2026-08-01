@@ -554,7 +554,12 @@ func (n *Node) ProposeBlock() (core.Block, error) {
 	headHash := head.Hash()
 	height := head.Header.Height + 1
 
-	active, total := n.chain.ValidatorSet().EffectiveStake(nil)
+	// EffectiveValidatorSet excludes any validator jailed for a detected
+	// equivocation (see chain.Chain.Jailed's own doc comment) -- the SAME
+	// view AddBlock's own proposer-selection check uses, so this always
+	// agrees with what AddBlock will independently re-derive when
+	// validating the block this function is about to build.
+	active, total := n.chain.EffectiveValidatorSet()
 	selected, err := pos.SelectProposer(active, total, pos.ProposerSeed(headHash, height))
 	if err != nil {
 		return core.Block{}, err
