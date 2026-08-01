@@ -5,6 +5,7 @@ import (
 
 	"l1chain/core"
 	"l1chain/exchange"
+	"l1chain/pos"
 	"l1chain/state"
 	"l1chain/vm"
 )
@@ -113,6 +114,23 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 	// isEVMTx's own doc comment (chain/evm_wiring.go).
 	if isEVMTx(st, tx) {
 		return applyEVMTx(st, tx, from, height)
+	}
+
+	// PoS checkpoint attestations (M8) are a reserved address the state
+	// transition routes to instead of the VM -- the same shape as the
+	// exchange/EVM checks above. Checked before isContractTx for the same
+	// reason: an attestation tx's calldata (its BLS signature plus target
+	// height/hash, see pos.EncodeAttest) is non-empty, so isContractTx would
+	// otherwise misroute it to the StackVM, which has no idea what an
+	// attestation is. This is a pure nonce-bumping no-op at THIS layer --
+	// no value movement, no VM -- because BLS verification and stake
+	// tallying are whole-BLOCK concerns Chain.AddBlock handles one layer up
+	// (see chain.go's verifyAttestations/recordAttestations), not a per-tx
+	// state-transition concern.
+	if pos.IsAttestationTx(tx) {
+		from.Nonce++
+		st.SetAccount(tx.From, from)
+		return nil
 	}
 
 	if isContractTx(st, tx) {

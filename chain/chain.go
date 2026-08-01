@@ -38,6 +38,21 @@ var (
 	// ProposerSig does not verify against the selected proposer's BLS
 	// public key over the header's own SigningHash.
 	ErrBadProposerSig = errors.New("chain: invalid proposer BLS signature")
+	// ErrBadAttestation is returned by AddBlock (PoS mode) when a checkpoint
+	// attestation transaction is malformed, targets a height that is not a
+	// checkpoint (not a multiple of pos.CheckpointInterval), targets a
+	// height at or beyond the block that carries it (a validator cannot
+	// attest to a block that does not exist yet), comes from a sender that
+	// is not a registered validator, or carries a BLS signature that does
+	// not verify.
+	ErrBadAttestation = errors.New("chain: invalid checkpoint attestation")
+	// ErrConflictsWithFinalized is returned by AddBlock (PoS mode) when a
+	// block's ancestry does not pass through the currently finalized
+	// checkpoint -- the concrete safety property PoS finality buys: once
+	// >=2/3 of stake has attested to a checkpoint, no competing branch that
+	// conflicts with it can ever become canonical again, regardless of how
+	// much raw weight it accumulates (see respectsFinality).
+	ErrConflictsWithFinalized = errors.New("chain: block conflicts with an already-finalized checkpoint")
 )
 
 // DefaultChainID is the replay-protection domain used by genesis and every
@@ -87,16 +102,32 @@ type Chain struct {
 	// time, so changing it after blocks exist would make historical blocks
 	// re-derive under a mode different from the one they were actually
 	// produced and validated under.
-	//
-	// NOT YET consulted by AddBlock/CandidateStateRoot as of this PR -- PoW
-	// behavior is completely unaffected until the wiring PR that follows
-	// this one (see the M8 plan's PR5).
 	consensusMode consensus.Mode
 	// validatorSet is nil for a PoW chain; for a PoS chain it is the
 	// genesis-fixed validator registry SetConsensusMode was given (see
 	// pos.ValidatorSet's own doc comment for why M8 scopes this as
 	// immutable, genesis-only config -- no live deposit/exit path exists).
 	validatorSet *pos.ValidatorSet
+
+	// attestedRound/checkpointStake/finalizedHash/finalizedHeight track PoS
+	// checkpoint finality (M8, PoS mode only). All four are computed as
+	// AddBlock side effects and are PERMANENT once set -- never rolled back
+	// by a later reorg. That permanence is exactly what makes finality
+	// actually irreversible across competing branches: the real safety
+	// property PoS buys (see respectsFinality/recordAttestations).
+	//
+	// attestedRound maps a checkpoint round (pos.CheckpointRound(height)) to
+	// the one target hash each validator has cast a vote for in that round.
+	// A validator's SECOND, conflicting vote for an already-voted round is
+	// simply not tallied into checkpointStake -- this dedup-at-record-time
+	// is the entire safety argument for why two conflicting targets can
+	// never both cross 2/3 of stake (a validator contributes to at most one
+	// target's tally per round, full stop). Detecting and JAILING the
+	// equivocating validator is PR7's addition on top of this.
+	attestedRound   map[uint64]map[core.Address]core.Hash
+	checkpointStake map[core.Hash]uint64
+	finalizedHash   core.Hash
+	finalizedHeight uint64
 }
 
 // SetExchangeMode sets the matching mode every block's exchange transactions
@@ -128,6 +159,17 @@ func (c *Chain) ConsensusMode() consensus.Mode { return c.consensusMode }
 // ValidatorSet returns the chain's validator set, or nil for a PoW chain.
 func (c *Chain) ValidatorSet() *pos.ValidatorSet { return c.validatorSet }
 
+// FinalizedHeight returns the height of the most recently finalized PoS
+// checkpoint, or 0 if none has finalized yet (indistinguishable from "0 is
+// finalized" -- callers that need to tell the two apart should check
+// FinalizedHash().IsZero() too, exactly like genesis's own hash conventions
+// elsewhere in this codebase).
+func (c *Chain) FinalizedHeight() uint64 { return c.finalizedHeight }
+
+// FinalizedHash returns the hash of the most recently finalized PoS
+// checkpoint, or the zero Hash if none has finalized yet.
+func (c *Chain) FinalizedHash() core.Hash { return c.finalizedHash }
+
 // NewChain creates a chain seeded with the genesis block. The optional alloc is
 // the genesis allocation (same map given to ApplyGenesis); it is required for
 // the engine to reproduce genesis balances when replaying state. Callers that
@@ -155,10 +197,12 @@ func NewChain(genesis core.Block, alloc ...map[core.Address]uint64) *Chain {
 // already disagree with headState's root by the time it ran.
 func NewChainWithAlloc(genesis core.Block, alloc, baseAlloc map[core.Address]uint64) *Chain {
 	c := &Chain{
-		blocks:      make(map[core.Hash]core.Block),
-		td:          make(map[core.Hash]uint64),
-		heightIndex: make(map[uint64]core.Hash),
-		chainID:     DefaultChainID,
+		blocks:          make(map[core.Hash]core.Block),
+		td:              make(map[core.Hash]uint64),
+		heightIndex:     make(map[uint64]core.Hash),
+		chainID:         DefaultChainID,
+		attestedRound:   make(map[uint64]map[core.Address]core.Hash),
+		checkpointStake: make(map[core.Hash]uint64),
 	}
 	c.genesisAlloc = alloc
 	c.genesisBaseAlloc = baseAlloc
@@ -300,9 +344,123 @@ func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address
 	return st.StateRoot(), nil
 }
 
+// respectsFinality rejects any block whose ancestry does not pass through
+// the currently finalized PoS checkpoint at the finalized height -- the
+// concrete implementation of "no competing branch that conflicts with an
+// already-finalized checkpoint can ever become canonical again." A no-op for
+// PoW chains and before anything has ever finalized.
+//
+// This runs BEFORE the proposer/weight checks in AddBlock, so a conflicting
+// block is rejected at the earliest possible point: it can never accumulate
+// even a single block of weight, let alone become heavier than the
+// canonical branch. That is a stronger safety property than merely losing a
+// td comparison at reorg time.
+func (c *Chain) respectsFinality(b core.Block) error {
+	if c.consensusMode != consensus.PoS || c.finalizedHash.IsZero() {
+		return nil
+	}
+	h := b.Header.PrevHash
+	for {
+		blk, ok := c.blocks[h]
+		if !ok {
+			return ErrUnknownParent
+		}
+		if blk.Header.Height == c.finalizedHeight {
+			if h != c.finalizedHash {
+				return ErrConflictsWithFinalized
+			}
+			return nil
+		}
+		if blk.Header.Height < c.finalizedHeight {
+			return ErrConflictsWithFinalized
+		}
+		h = blk.Header.PrevHash
+	}
+}
+
+// verifyAttestations checks every checkpoint-attestation transaction in b
+// (PoS mode only): well-formed calldata, a checkpoint-aligned target height
+// that is not in b's own future (a validator cannot attest to a block that
+// does not exist yet -- b's own attestations, if any, necessarily reference
+// an EARLIER block, never b itself, since b's hash is not yet determined
+// while its own Txs are still being decided), a sender that is a registered
+// validator, and a BLS signature that verifies. A bad attestation rejects
+// the WHOLE block, the same severity a bad ECDSA signature already gets via
+// applyTxAtSession's own ErrBadSig.
+func (c *Chain) verifyAttestations(b core.Block) error {
+	for i := range b.Txs {
+		tx := b.Txs[i]
+		if !pos.IsAttestationTx(tx) {
+			continue
+		}
+		targetHeight, targetHash, sig, err := pos.DecodeAttest(tx.Data)
+		if err != nil {
+			return ErrBadAttestation
+		}
+		if targetHeight%pos.CheckpointInterval != 0 {
+			return ErrBadAttestation
+		}
+		if targetHeight >= b.Header.Height {
+			return ErrBadAttestation
+		}
+		validator, ok := c.validatorSet.ByAddress(tx.From)
+		if !ok {
+			return ErrBadAttestation
+		}
+		if !pos.Verify(validator.BLSPubKey, targetHash[:], sig, pos.DST(c.chainID)) {
+			return ErrBadAttestation
+		}
+	}
+	return nil
+}
+
+// recordAttestations tallies every (already-verified, by verifyAttestations
+// before b was ever committed) attestation tx in b into c.checkpointStake,
+// and advances c.finalizedHash/finalizedHeight once a target crosses 2/3 of
+// the validator set's total stake. Called AFTER b is committed, unconditionally
+// of whether b becomes the new canonical head -- attestations are tallied
+// permanently and globally, independent of canonicalness, which is what
+// makes finality survive a later reorg away from the branch that carried them.
+func (c *Chain) recordAttestations(b core.Block) {
+	for i := range b.Txs {
+		tx := b.Txs[i]
+		if !pos.IsAttestationTx(tx) {
+			continue
+		}
+		targetHeight, targetHash, _, err := pos.DecodeAttest(tx.Data)
+		if err != nil {
+			continue // unreachable: verifyAttestations already rejected malformed data
+		}
+		validator, ok := c.validatorSet.ByAddress(tx.From)
+		if !ok {
+			continue // unreachable: verifyAttestations already rejected unknown senders
+		}
+		round := pos.CheckpointRound(targetHeight)
+		if c.attestedRound[round] == nil {
+			c.attestedRound[round] = make(map[core.Address]core.Hash)
+		}
+		if _, voted := c.attestedRound[round][tx.From]; voted {
+			// Already recorded a vote (matching or conflicting) for this
+			// round from this validator -- do not tally again. A
+			// conflicting second vote is equivocation; PR7 detects and
+			// jails it. Here, not double-tallying is what keeps the 2/3
+			// threshold mathematically sound.
+			continue
+		}
+		c.attestedRound[round][tx.From] = targetHash
+		c.checkpointStake[targetHash] += validator.Stake
+
+		if targetHeight > c.finalizedHeight && c.checkpointStake[targetHash]*3 >= c.validatorSet.TotalStake()*2 {
+			c.finalizedHash = targetHash
+			c.finalizedHeight = targetHeight
+		}
+	}
+}
+
 // AddBlock validates and stores b, performing a reorg if b's branch becomes the
-// heaviest. Validation covers parent linkage, height, PoW (or, in PoS mode,
-// proposer-selection + BLS signature), tx merkle root, and re-derived state root.
+// heaviest. Validation covers parent linkage, height, finality (PoS mode),
+// PoW (or, in PoS mode, proposer-selection + BLS signature + attestations),
+// tx merkle root, and re-derived state root.
 func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) error {
 	hash := b.Hash()
 	if _, exists := c.blocks[hash]; exists {
@@ -314,6 +472,9 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	}
 	if b.Header.Height != parent.Header.Height+1 {
 		return ErrBadHeight
+	}
+	if err := c.respectsFinality(b); err != nil {
+		return err
 	}
 
 	// weight is this block's contribution to cumulative "difficulty" (c.td),
@@ -341,6 +502,9 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 		signingHash := b.Header.SigningHash()
 		if !pos.Verify(selected.BLSPubKey, signingHash[:], b.Header.ProposerSig, pos.DST(c.chainID)) {
 			return ErrBadProposerSig
+		}
+		if err := c.verifyAttestations(b); err != nil {
+			return err
 		}
 		weight = 1
 	} else {
@@ -372,6 +536,12 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	// Commit the block and its cumulative weight.
 	c.blocks[hash] = b
 	c.td[hash] = c.td[b.Header.PrevHash] + weight
+	if c.consensusMode == consensus.PoS {
+		// Tallied permanently, independent of which branch ends up
+		// canonical below -- see recordAttestations' own doc comment for
+		// why that permanence is what makes finality survive a reorg.
+		c.recordAttestations(b)
+	}
 
 	// Reorg: adopt the strictly heaviest branch as the canonical head.
 	if c.td[hash] > c.td[c.head] {
