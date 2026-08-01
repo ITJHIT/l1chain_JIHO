@@ -12,6 +12,7 @@ require (
 	github.com/libp2p/go-libp2p-pubsub v0.17.0
 	github.com/marcopolo/simnet v0.0.7
 	github.com/multiformats/go-multiaddr v0.16.1
+	github.com/supranational/blst v0.3.16
 	go.etcd.io/bbolt v1.5.0
 )
 
@@ -115,7 +116,6 @@ require (
 	github.com/quic-go/webtransport-go v0.10.0 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/supranational/blst v0.3.16 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
