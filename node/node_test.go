@@ -6,11 +6,22 @@ import (
 	"testing"
 
 	"l1chain/chain"
+	"l1chain/consensus"
 	"l1chain/core"
+	"l1chain/pos"
 	"l1chain/wallet"
 )
 
 const testDifficulty = 6
+
+// addr builds a deterministic non-zero address from a single byte, mirroring
+// the same small helper other packages' own test files already define
+// locally (chain, redteam, etc.).
+func addr(b byte) core.Address {
+	var a core.Address
+	a[0] = b
+	return a
+}
 
 func newKeyT(t *testing.T) wallet.Key {
 	t.Helper()
@@ -290,5 +301,95 @@ func TestReplayAcrossChainIDRejected(t *testing.T) {
 	}
 	if got := nodeB.Head().Header.Height; got != 0 {
 		t.Fatalf("node B head advanced to %d on a foreign-chain block", got)
+	}
+}
+
+func testValidatorInfo(t *testing.T, addr core.Address, stake uint64) pos.ValidatorInfo {
+	t.Helper()
+	k, err := pos.NewKey()
+	if err != nil {
+		t.Fatalf("pos.NewKey: %v", err)
+	}
+	return pos.ValidatorInfo{Address: addr, BLSPubKey: k.PubKey(), Stake: stake}
+}
+
+func TestNewDefaultsToPoWConsensusMode(t *testing.T) {
+	a := newKeyT(t)
+	n, err := New(Config{
+		MinerKey:     newKeyT(t),
+		Difficulty:   testDifficulty,
+		GenesisAlloc: map[core.Address]uint64{a.Address(): 1000},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+	if got := n.ConsensusMode(); got != consensus.PoW {
+		t.Fatalf("ConsensusMode() = %v, want PoW (Config.ConsensusMode left unset)", got)
+	}
+}
+
+func TestNewWithPoSConsensusModeAndValidators(t *testing.T) {
+	a := newKeyT(t)
+	validators := []pos.ValidatorInfo{testValidatorInfo(t, addr(1), 100)}
+	n, err := New(Config{
+		MinerKey:      newKeyT(t),
+		Difficulty:    testDifficulty,
+		GenesisAlloc:  map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode: consensus.PoS,
+		Validators:    validators,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+	if got := n.ConsensusMode(); got != consensus.PoS {
+		t.Fatalf("ConsensusMode() = %v, want PoS", got)
+	}
+}
+
+func TestNewRejectsPoSWithoutValidators(t *testing.T) {
+	a := newKeyT(t)
+	_, err := New(Config{
+		MinerKey:      newKeyT(t),
+		Difficulty:    testDifficulty,
+		GenesisAlloc:  map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode: consensus.PoS,
+		// Validators deliberately omitted.
+	})
+	if err == nil {
+		t.Fatal("New must reject ConsensusMode: PoS with no validators")
+	}
+}
+
+// TestReloadRejectsPoSConsensusMode proves the store-persistence gap fails
+// LOUD, not silent: consensus mode is not yet persisted (M8), so reloading a
+// chain from an existing store while asking for PoS must be refused outright
+// rather than silently starting a PoW node the caller believes is PoS.
+func TestReloadRejectsPoSConsensusMode(t *testing.T) {
+	a := newKeyT(t)
+	miner := newKeyT(t)
+	dbPath := filepath.Join(t.TempDir(), "chain.db")
+	alloc := map[core.Address]uint64{a.Address(): 1000}
+
+	n1, err := New(Config{DBPath: dbPath, MinerKey: miner, Difficulty: testDifficulty, GenesisAlloc: alloc})
+	if err != nil {
+		t.Fatalf("New(1): %v", err)
+	}
+	if err := n1.Close(); err != nil {
+		t.Fatalf("Close(1): %v", err)
+	}
+
+	validators := []pos.ValidatorInfo{testValidatorInfo(t, addr(1), 100)}
+	_, err = New(Config{
+		DBPath:        dbPath,
+		MinerKey:      miner,
+		Difficulty:    testDifficulty,
+		GenesisAlloc:  alloc,
+		ConsensusMode: consensus.PoS,
+		Validators:    validators,
+	})
+	if !errors.Is(err, ErrConsensusModeNotPersisted) {
+		t.Fatalf("New(reload, PoS) = %v, want ErrConsensusModeNotPersisted", err)
 	}
 }
