@@ -21,11 +21,6 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -count=1 ./...
-      # TEMPORARY: captures real per-test evidence for the m8 PoS redteam
-      # report (same one-off pattern M6/M7's reports used) -- reverted in
-      # this same PR before merge, does not appear in the merged workflow.
-      - name: "TEMP: verbose evidence capture for M8 PoS adversarial tests"
-        run: go test -v -count=1 -run 'TestAdvPoS|TestPoSWrongProposer|TestPoSDoubleProp|TestPoSDoubleAttest|TestPoSFinalitySafety' ./chain/
       - name: Race detector (concurrency-sensitive packages)
         # gcc is available on ubuntu runners, so -race (cgo) works here
         # even though it is unavailable in the pure-Go dev sandbox.

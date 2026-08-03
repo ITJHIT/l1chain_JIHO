@@ -1,0 +1,130 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M8",
+  "title": "M8 Full Proof-of-Stake consensus mode -- regression sweep + adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-08-03",
+  "lane": "executor-qa-red-team (21-M4RedTeam lineage), extended to the new PoS consensus path added across PR1-PR9 (#35-#43, M8 milestone)",
+  "target": "Chain.AddBlock's PoS-mode branch (proposer-correctness check, BLS proposer-signature verification, attestation verification/tally, finality gate, equivocation detection/jailing) -- the real consensus path a PoS node validates every block through, wired via consensus.Mode/pos.ValidatorSet/pos.SelectProposer. PoW blocks take an unchanged code path (ProposerSig stays nil, preimage(true)==preimage(false)), proven unaffected by the same go_test_all_summary run below rather than by argument alone.",
+  "test_packages": ["l1chain/chain"],
+  "test_files": ["chain/pos_adversarial_test.go", "chain/pos_wiring_test.go", "chain/chain.go"],
+  "production_code_modified": false,
+  "principle": "Six cases across two categories. The four required wiring-PR tests (pos_wiring_test.go, PR5-PR7) prove the baseline consensus-safety properties: a genuinely WRONG identity (real signature, wrong validator) is rejected; a conflicting branch forking before a >=2/3-stake-finalized checkpoint is rejected even though it is nominally heavier by raw td, because the finality gate runs before td is ever compared; a validator that double-proposes for the same parent, or casts two conflicting attestation votes for the same checkpoint round, is jailed and immediately excluded from EffectiveValidatorSet (future proposer selection and future attestation tallies), not just flagged. This report's own two new cases (pos_adversarial_test.go, PR10) cover the ONE category those required tests do not: a FORGED signature -- correct identity claimed (correct Coinbase / correct attester From), but the signature bytes do not actually come from that identity's key (a different validator's real key, or fixed-length garbage). This is a strictly different failure mode than 'wrong but genuine' identity, and is the standard first adversarial move against any signature-gated consensus rule.",
+  "new_test_names": [
+    "TestAdvPoS01ForgedProposerSignatureRejected",
+    "TestAdvPoS02ForgedAttestationSignatureRejected"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-1",
+      "test": "TestAdvPoS01ForgedProposerSignatureRejected",
+      "scenario": "A block whose Coinbase correctly names the validator pos.SelectProposer actually picked for that height, but whose ProposerSig is (a) a real BLS signature produced by a DIFFERENT validator's key over the correct SigningHash, or (b) fixed-length all-zero garbage that is not a real signature at all. Submitted to two independent *Chain instances (chainA, chainB) from identical genesis via AddBlock.",
+      "expected": "Both sub-cases rejected with ErrBadProposerSig on both independent chain instances; chainA's head does not advance past genesis after either attempt.",
+      "verdict": "passed",
+      "receipt_evidence": "CI run https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30780283874 job 91583439385 (temporary verbose step, reverted after, same one-off pattern M4/M6/M7 used): '=== RUN   TestAdvPoS01ForgedProposerSignatureRejected' / '--- PASS: TestAdvPoS01ForgedProposerSignatureRejected (0.00s)'."
+    },
+    {
+      "id": "case-2",
+      "test": "TestAdvPoS02ForgedAttestationSignatureRejected",
+      "scenario": "A chain driven to a real checkpoint height (32 real proposed+accepted PoS blocks) via the actual SelectProposer+sign+AddBlock path, then a block carrying one attestation tx whose From correctly names a registered validator (addr(10)) and whose targetHeight/targetHash correctly reference the real checkpoint block, but whose embedded BLS signature was produced by a DIFFERENT registered validator's real key (addr(11)'s key), submitted via AddBlock.",
+      "expected": "Rejected with ErrBadAttestation; the chain's head height stays at exactly the checkpoint height (32) -- the forged-attestation block itself is never committed, so the head does not advance past the checkpoint.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvPoS02ForgedAttestationSignatureRejected' / '--- PASS: TestAdvPoS02ForgedAttestationSignatureRejected (0.06s)'."
+    },
+    {
+      "id": "case-3",
+      "test": "TestPoSWrongProposerBlockRejected",
+      "scenario": "(Required wiring-PR test, PR5, cited not duplicated.) A block for height 1, individually well-formed and validly BLS-signed, but by a validator pos.SelectProposer did NOT pick for that height -- a genuinely wrong identity, not a forged signature. Submitted to two independent chain instances.",
+      "expected": "Rejected with ErrWrongProposer on both independent instances; neither chain's head advances past genesis.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestPoSWrongProposerBlockRejected' / '--- PASS: TestPoSWrongProposerBlockRejected (0.00s)'."
+    },
+    {
+      "id": "case-4",
+      "test": "TestPoSFinalitySafetyRejectsConflictingHeavierBranch",
+      "scenario": "(Required wiring-PR test, PR6, cited not duplicated.) Two independent chains independently reach an identical finalized checkpoint via real >=2/3-stake attestations (stakes 10/20/70 of 100 total); a block extending genesis directly -- forking BEFORE the finalized checkpoint -- is then submitted via AddBlock on both instances, despite being a completely validly-proposer-signed PoS block and nominally heavier by raw accumulated weight than the finalized branch's early history.",
+      "expected": "Rejected with ErrConflictsWithFinalized on both independent instances -- proving the finality gate (which runs before any td comparison) is what protects safety here, not the pre-existing heaviest-td reorg rule, which by itself would have accepted the heavier branch.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestPoSFinalitySafetyRejectsConflictingHeavierBranch' / '--- PASS: TestPoSFinalitySafetyRejectsConflictingHeavierBranch (0.11s)'."
+    },
+    {
+      "id": "case-5",
+      "test": "TestPoSDoubleProposeDetectedAndJailed",
+      "scenario": "(Required wiring-PR test, PR7, cited not duplicated.) The real, correctly-selected proposer for height 1 proposes TWO different, individually valid blocks for the SAME parent (differing only in carried tx, so distinct hashes) -- equivocation. Both submitted via AddBlock on one chain, in sequence.",
+      "expected": "The first block is accepted and the validator is NOT yet jailed (one proposal alone is not equivocation). The second, conflicting block for the same parent is also accepted (both are individually valid), but the validator IS jailed immediately after -- and is confirmed actually excluded from EffectiveValidatorSet afterward (future proposer eligibility), with total effective stake reduced by exactly the jailed validator's stake, not just a flag nobody reads.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestPoSDoubleProposeDetectedAndJailed' / '--- PASS: TestPoSDoubleProposeDetectedAndJailed (0.00s)'."
+    },
+    {
+      "id": "case-6",
+      "test": "TestPoSDoubleAttestDetectedAndJailed",
+      "scenario": "(Required wiring-PR test, PR7, cited not duplicated.) A validator casts two CONFLICTING, individually well-formed and correctly-signed attestation votes for the SAME checkpoint round (different targetHash for the same round).",
+      "expected": "The conflicting (second) vote is detected, never tallied toward finality, and the validator is jailed -- confirmed excluded from EffectiveValidatorSet afterward, mirroring case-5's own eligibility-change proof for the attestation side of equivocation.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestPoSDoubleAttestDetectedAndJailed' / '--- PASS: TestPoSDoubleAttestDetectedAndJailed (0.06s)'."
+    }
+  ],
+  "summary": {
+    "total_cases": 6,
+    "passed": 6,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No case in this report's own new suite (PR10, case-1/case-2) revealed a defect -- both passed on their first real CI run. For full milestone honesty: this milestone's real defects were caught and fixed earlier, during design/implementation of PR5 and PR6 respectively, before any adversarial pass: (1) PoS blocks always carry Header.Difficulty==0, so the pre-existing td-based reorg rule would have frozen cumulative weight at 0 forever had it been reused unchanged -- caught while designing PR5, fixed by having every accepted PoS block contribute weight=1 to td instead of Difficulty. (2) An attestation transaction cannot reference the hash of the block that carries it, since that hash is not determined until after the block's own Txs (which feed MerkleRoot) are decided -- a hard circular-dependency impossibility, not a style choice -- caught while designing PR6's required finality test, before writing it; fixed by requiring attestations for a checkpoint to always ride in a LATER block, referencing the checkpoint block's real, already-known hash (this is why case-2 above drives 32 real blocks before the forged attestation, and why TestPoSFinalitySafetyRejectsConflictingHeavierBranch's own setup does the same). Neither defect ever reached a merged PR in its broken form; both are named here per this milestone's own discipline of documenting real bugs found and fixed, not just claiming a clean run.",
+    "regression_sweep": "The same `go test -count=1 ./...` CI run this report's own evidence comes from also exercises the full pre-existing ~100+ test suite across all 17 packages (chain, cmd/l1, consensus, core, evm, evm/adapter, exchange, node, p2p, pos, redteam, rpc, state, store, trie, vm, wallet) unchanged -- confirming, by direct CI evidence rather than by the plan's own a-priori low-risk argument alone, that adding consensus.Mode/pos.ValidatorSet/Header.ProposerSig left every pre-existing PoW-path test byte-for-byte green. In particular l1chain/chain (100+ existing PoW tests) and l1chain/redteam (M4-M7's own adversarial suites) both report 'ok' in the same run as this report's new PoS cases -- direct proof the PoW default path (Header.ProposerSig stays nil, preimage(true)==preimage(false)) is unaffected, not merely argued to be so from the M8 plan's own ground-truth notes."
+  },
+  "acceptance": {
+    "go_vet": { "command": "go vet ./...", "result": "pass" },
+    "go_test_pos_adversarial_verbose": {
+      "command": "go test -v -count=1 -run 'TestAdvPoS|TestPoSWrongProposer|TestPoSDoubleProp|TestPoSDoubleAttest|TestPoSFinalitySafety' ./chain/",
+      "note": "Run as a one-off temporary CI step (this dev environment has no local Go toolchain) solely to capture real per-test evidence for this report; the step was reverted immediately after in the same PR (#44) before merge and does not appear in the merged workflow.",
+      "result": "pass",
+      "raw": [
+        "=== RUN   TestAdvPoS01ForgedProposerSignatureRejected",
+        "--- PASS: TestAdvPoS01ForgedProposerSignatureRejected (0.00s)",
+        "=== RUN   TestAdvPoS02ForgedAttestationSignatureRejected",
+        "--- PASS: TestAdvPoS02ForgedAttestationSignatureRejected (0.06s)",
+        "=== RUN   TestPoSWrongProposerBlockRejected",
+        "--- PASS: TestPoSWrongProposerBlockRejected (0.00s)",
+        "=== RUN   TestPoSFinalitySafetyRejectsConflictingHeavierBranch",
+        "--- PASS: TestPoSFinalitySafetyRejectsConflictingHeavierBranch (0.11s)",
+        "=== RUN   TestPoSDoubleProposeDetectedAndJailed",
+        "--- PASS: TestPoSDoubleProposeDetectedAndJailed (0.00s)",
+        "=== RUN   TestPoSDoubleAttestDetectedAndJailed",
+        "--- PASS: TestPoSDoubleAttestDetectedAndJailed (0.06s)",
+        "PASS"
+      ]
+    },
+    "go_test_all_summary": {
+      "command": "go test -count=1 ./...",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/chain\t0.722s",
+        "ok  \tl1chain/cmd/l1\t4.773s",
+        "ok  \tl1chain/consensus\t0.005s",
+        "ok  \tl1chain/core\t0.003s",
+        "ok  \tl1chain/evm\t0.022s",
+        "ok  \tl1chain/evm/adapter\t0.010s",
+        "ok  \tl1chain/exchange\t0.005s",
+        "ok  \tl1chain/node\t0.205s",
+        "ok  \tl1chain/p2p\t43.826s",
+        "ok  \tl1chain/pos\t0.034s",
+        "ok  \tl1chain/redteam\t0.022s",
+        "ok  \tl1chain/rpc\t0.037s",
+        "ok  \tl1chain/state\t0.003s",
+        "ok  \tl1chain/store\t0.045s",
+        "ok  \tl1chain/trie\t0.005s",
+        "ok  \tl1chain/vm\t0.043s",
+        "ok  \tl1chain/wallet\t0.014s",
+        "source: https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30780283874 job 91583439385, step 'Test'"
+      ]
+    },
+    "race_detector": {
+      "command": "go test -race -count=1 ./node/ ./p2p/",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/node\t1.707s",
+        "ok  \tl1chain/p2p\t46.082s"
+      ]
+    }
+  }
+}
