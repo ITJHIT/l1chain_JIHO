@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"l1chain/consensus"
 	"l1chain/core"
 	"l1chain/vm"
 )
@@ -142,5 +143,95 @@ func TestTxWithTipExceedingFeeCapRejected(t *testing.T) {
 	_, _, err := c.CandidateStateRoot([]core.Transaction{tx}, addr(9), acceptAll)
 	if !errors.Is(err, ErrTipExceedsFeeCap) {
 		t.Fatalf("CandidateStateRoot (tipCap 10 > feeCap 5) = %v, want ErrTipExceedsFeeCap", err)
+	}
+}
+
+// TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock is PR6's own required
+// test (non-negotiable per the M9 plan): the core "this is actually a
+// market" property, isolated on a single chain (PR5's own
+// TestBaseFeeAgreesAcrossIndependentChains already proves cross-chain
+// agreement; this test's own job is just the directional response to
+// demand). Each block's OWN Header.BaseFee reflects its PARENT's fullness,
+// not its own -- see TestBaseFeeAgreesAcrossIndependentChains's own doc
+// comment for why the effect of an above-target block only becomes
+// observable in the NEXT block's BaseFee.
+func TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock(t *testing.T) {
+	sender := addr(1)
+	alloc := map[core.Address]uint64{sender: 10_000_000}
+	g := Genesis{Alloc: alloc, Difficulty: testDiff, Timestamp: 0, InitialBaseFee: 100}
+	gb := g.ToBlock()
+	c := NewChain(gb, alloc)
+	c.SetGasLimit(100_000) // target = 50_000
+
+	contract := vm.CreateAddress(sender, 0)
+
+	// Setup: deploy (32_000 gas, below target) -- not asserted on directly.
+	deployBlk := mineExchangeBlock(t, c, gb, []core.Transaction{feeTx(sender, core.Address{}, 0, 40_000, counterCode)})
+	if err := c.AddBlock(deployBlk, acceptAll); err != nil {
+		t.Fatalf("AddBlock deploy: %v", err)
+	}
+
+	// Ten calls: 52_120 gas, ABOVE the 50_000 target.
+	var calls []core.Transaction
+	for i := uint64(0); i < 10; i++ {
+		calls = append(calls, feeTx(sender, contract, i+1, 10_000, nil))
+	}
+	fullBlk := mineExchangeBlock(t, c, deployBlk, calls)
+	if err := c.AddBlock(fullBlk, acceptAll); err != nil {
+		t.Fatalf("AddBlock full block: %v", err)
+	}
+
+	emptyBlk1 := mineExchangeBlock(t, c, fullBlk, nil)
+	if err := c.AddBlock(emptyBlk1, acceptAll); err != nil {
+		t.Fatalf("AddBlock empty block 1: %v", err)
+	}
+	riseBaseFee := emptyBlk1.Header.BaseFee // reflects fullBlk's above-target usage
+
+	emptyBlk2 := mineExchangeBlock(t, c, emptyBlk1, nil)
+	if err := c.AddBlock(emptyBlk2, acceptAll); err != nil {
+		t.Fatalf("AddBlock empty block 2: %v", err)
+	}
+	fallBaseFee := emptyBlk2.Header.BaseFee // reflects emptyBlk1's zero usage
+
+	if riseBaseFee <= fullBlk.Header.BaseFee {
+		t.Fatalf("BaseFee after an above-target block (%d) did not rise above that block's own BaseFee (%d)", riseBaseFee, fullBlk.Header.BaseFee)
+	}
+	if fallBaseFee >= riseBaseFee {
+		t.Fatalf("BaseFee after an empty block (%d) did not fall below the prior block's (%d)", fallBaseFee, riseBaseFee)
+	}
+}
+
+// TestBlockExceedingGasLimitRejected is PR6's other required test: a block
+// whose actual gas consumption exceeds the chain's configured block gas cap
+// is rejected with ErrBlockGasLimitExceeded, even though its declared
+// Header.GasUsed correctly matches that (too-high) actual consumption --
+// isolating the gas-limit check from the separate GasUsed-honesty check
+// (see TestBadGasUsedRejected below).
+func TestBlockExceedingGasLimitRejected(t *testing.T) {
+	c, gb, _ := newContractChain() // alloc 10_000_000
+	c.SetGasLimit(10_000)          // well below a single deploy's real cost (32_000 = vm.GasCreate)
+
+	b := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx(0)})
+	if err := c.AddBlock(b, acceptAll); !errors.Is(err, ErrBlockGasLimitExceeded) {
+		t.Fatalf("AddBlock (32_000 actual gas > 10_000 limit) = %v, want ErrBlockGasLimitExceeded", err)
+	}
+}
+
+// TestBadGasUsedRejected proves a block whose declared Header.GasUsed does
+// not match the actual gas consumed by its transactions is rejected with
+// ErrBadGasUsed -- independent of whether the (wrong) claimed value would
+// itself have been under the gas limit. The header is tampered AFTER mining
+// and re-mined so its PoW is genuinely valid for the tampered content
+// (AddBlock must catch this by re-deriving GasUsed itself, not by noticing
+// a stale/invalid PoW).
+func TestBadGasUsedRejected(t *testing.T) {
+	c, gb, _ := newContractChain()
+
+	b := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx(0)})
+	b.Header.GasUsed = 0 // tamper: claim 0 despite the deploy really consuming 32_000
+	consensus.Mine(&b.Header, 0)
+
+	if err := c.AddBlock(b, acceptAll); !errors.Is(err, ErrBadGasUsed) {
+		t.Fatalf("AddBlock (tampered GasUsed) = %v, want ErrBadGasUsed", err)
 	}
 }

@@ -59,6 +59,17 @@ var (
 	// ErrWrongProposer: BaseFee is never chosen freely, only independently
 	// re-derived and checked, identically by every validator.
 	ErrBadBaseFee = errors.New("chain: block BaseFee does not match the protocol-computed value")
+	// ErrBadGasUsed is returned by AddBlock (M9) when a block's declared
+	// Header.GasUsed does not equal the actual gas consumed by its fee-priced
+	// (contract/EVM) transactions -- a block cannot understate or overstate
+	// its own real resource consumption, since GasUsed feeds directly into
+	// the NEXT block's BaseFee computation (ComputeBaseFee).
+	ErrBadGasUsed = errors.New("chain: block GasUsed does not match actual gas consumed")
+	// ErrBlockGasLimitExceeded is returned by AddBlock (M9) when a block's
+	// actual gas consumption exceeds the chain's configured block gas cap
+	// (Chain.gasLimit) -- the hard ceiling GasTarget's elasticity is defined
+	// against (see chain.GasTarget/ElasticityMultiplier).
+	ErrBlockGasLimitExceeded = errors.New("chain: block gas used exceeds the configured gas limit")
 )
 
 // DefaultChainID is the replay-protection domain used by genesis and every
@@ -670,11 +681,19 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	if err != nil {
 		return err
 	}
-	// gasUsed (M9) is captured but not yet validated against b.Header.GasUsed
-	// or c.gasLimit -- that check is a separate safety property, added by a
-	// later PR (mirrors M8's own split of proposer validity from finality
-	// safety across two PRs, both touching AddBlock).
-	_ = gasUsed
+	// GasUsed (M9) is never chosen freely either -- it must equal the actual
+	// gas consumed by this block's fee-priced transactions (just computed by
+	// applyBlockRewarded above), since it feeds directly into the NEXT
+	// block's BaseFee. This is a separate safety property from BaseFee
+	// itself, checked here rather than folded into the earlier BaseFee check
+	// (mirrors M8's own split of proposer validity from finality safety
+	// across two PRs, both touching AddBlock).
+	if gasUsed != b.Header.GasUsed {
+		return ErrBadGasUsed
+	}
+	if gasUsed > c.gasLimit {
+		return ErrBlockGasLimitExceeded
+	}
 	if st.StateRoot() != b.Header.StateRoot {
 		return ErrBadStateRoot
 	}
