@@ -29,6 +29,14 @@ const (
 	sigSize    = 96
 )
 
+// SignatureSize re-exports sigSize for callers that need a cheap,
+// STRUCTURAL-ONLY shape check without access to a validator set to do real
+// verification -- e.g. p2p's gossip-layer topic validator (see
+// p2p/gossip.go's blockTopicValidator), which has no chain/validator-set
+// reference and can therefore only check "is ProposerSig even the right
+// length for a real BLS signature," never "is it valid."
+const SignatureSize = sigSize
+
 // Key wraps a BLS12-381 secret key used to sign validator attestations and
 // proposed block headers.
 type Key struct {

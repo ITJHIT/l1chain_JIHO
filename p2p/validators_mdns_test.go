@@ -15,6 +15,7 @@ import (
 
 	"l1chain/core"
 	"l1chain/node"
+	"l1chain/pos"
 	"l1chain/store"
 	"l1chain/wallet"
 
@@ -93,6 +94,46 @@ func TestBlockTopicValidatorRejectsInvalid(t *testing.T) {
 		func() { floodBlock(ctx, pa, validBytes, 1) },
 		time.Now().Add(30*time.Second)) {
 		t.Fatalf("honest node did not accept subsequent valid block (height=%d)", honest.Head().Header.Height)
+	}
+}
+
+// TestBlockTopicValidatorPoSShapeCheck proves the block validator's PoS
+// branch (see blockTopicValidator's own doc comment) is purely structural:
+// a ProposerSig of the correct length (pos.SignatureSize) passes even though
+// it is NOT a real BLS signature -- this gossip-layer validator has no
+// chain/validator-set state to check that, on purpose, and says so -- while
+// a wrong-length one is rejected outright, cheaply, before ever reaching a
+// real verification. Real proposer/signature verification still happens,
+// un-skippable, in AcceptExternalBlock -> Chain.AddBlock.
+func TestBlockTopicValidatorPoSShapeCheck(t *testing.T) {
+	faucet, err := wallet.NewKey()
+	if err != nil {
+		t.Fatalf("faucet: %v", err)
+	}
+	fa := faucet.Address()
+	_, blocks := mineChain(t, fa, 1)
+	base := blocks[0]
+
+	ctx := context.Background()
+
+	posShaped := base
+	posShaped.Header.ProposerSig = make([]byte, pos.SignatureSize)
+	posBytes, err := store.EncodeBlock(posShaped)
+	if err != nil {
+		t.Fatalf("encode PoS-shaped: %v", err)
+	}
+	if got := blockTopicValidator(ctx, "", msgOf(posBytes)); got != pubsub.ValidationAccept {
+		t.Fatalf("correct-length ProposerSig: validator = %v, want ValidationAccept", got)
+	}
+
+	wrongLen := base
+	wrongLen.Header.ProposerSig = make([]byte, 10)
+	wrongBytes, err := store.EncodeBlock(wrongLen)
+	if err != nil {
+		t.Fatalf("encode wrong-length: %v", err)
+	}
+	if got := blockTopicValidator(ctx, "", msgOf(wrongBytes)); got != pubsub.ValidationReject {
+		t.Fatalf("wrong-length ProposerSig: validator = %v, want ValidationReject", got)
 	}
 }
 
