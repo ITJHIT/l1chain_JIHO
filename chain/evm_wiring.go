@@ -64,8 +64,10 @@ func toGethValue(v uint64) *uint256.Int {
 // (height) is real. Threading genuine header context through would touch
 // Chain.AddBlock/CandidateStateRoot's own call sites, deliberately kept
 // out of this already-large wiring change; a contract that reads those
-// opcodes won't get meaningful values yet. block.basefee IS real as of M9
-// -- see BlockContext.BaseFee below.
+// opcodes won't get meaningful values yet. block.basefee (the BASEFEE
+// opcode, 0x48) IS real as of M9 -- see BlockContext.BaseFee below, set
+// from this same function's own baseFee parameter, the identical value
+// Chain.AddBlock independently re-derives and validates for this block.
 //
 // baseFee (M9) replaces the old flat GasPrice constant: gas is reserved at
 // the sender's own GasFeeCap (worst case), but only the effective price
@@ -129,7 +131,7 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 		Time:             1,
 		Difficulty:       new(big.Int),
 		GasLimit:         uint64(1) << 63,
-		BaseFee:          new(big.Int),
+		BaseFee:          new(big.Int).SetUint64(baseFee),
 		BlobBaseFee:      new(big.Int),
 		CostPerStateByte: params.CostPerStateByte,
 		// Same isMerge signal as Rules above, via vm.NewEVM's own internal

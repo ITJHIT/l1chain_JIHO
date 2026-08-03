@@ -130,3 +130,46 @@ func TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock(t *testing.T) 
 		}
 	}
 }
+
+// evmBaseFeeRuntime stores the current block's BASEFEE (opcode 0x48, no
+// stack input) into slot 0: BASEFEE PUSH1 0 SSTORE STOP.
+var evmBaseFeeRuntime = []byte{
+	0x48,       // BASEFEE
+	0x60, 0x00, // PUSH1 0
+	0x55, // SSTORE
+	0x00, // STOP
+}
+
+// TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee is PR7's own required proof:
+// a contract reading the BASEFEE opcode gets the real, consensus-agreed
+// value for the block its call executes in -- not the hardcoded-zero
+// placeholder BlockContext.BaseFee carried before this PR (see
+// applyEVMTx's own doc comment).
+func TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee(t *testing.T) {
+	sender := addr(1)
+	alloc := map[core.Address]uint64{sender: 10_000_000}
+	g := Genesis{Alloc: alloc, Difficulty: testDiff, Timestamp: 0, InitialBaseFee: 100}
+	gb := g.ToBlock()
+	c := NewChain(gb, alloc)
+
+	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: 50_000, ChainID: DefaultChainID, GasFeeCap: 150, GasTipCap: 0, Data: evmInitCode(evmBaseFeeRuntime), Signature: []byte{1}}
+	contractAddr := evmCreateAddr(sender, 0)
+	b1 := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx})
+	if err := c.AddBlock(b1, acceptAll); err != nil {
+		t.Fatalf("AddBlock deploy: %v", err)
+	}
+
+	callTx := core.Transaction{From: sender, To: contractAddr, Nonce: 1, GasLimit: 50_000, ChainID: DefaultChainID, GasFeeCap: 150, GasTipCap: 0, Signature: []byte{1}}
+	b2 := mineExchangeBlock(t, c, b1, []core.Transaction{callTx})
+	if err := c.AddBlock(b2, acceptAll); err != nil {
+		t.Fatalf("AddBlock call: %v", err)
+	}
+
+	// b2.Header.BaseFee is the real, protocol-computed BaseFee AddBlock
+	// independently validated for this exact block -- the value the call's
+	// own BASEFEE opcode must have seen.
+	want := slotHash(b2.Header.BaseFee)
+	if got := c.State().GetStorage(contractAddr, slotHash(0)); got != want {
+		t.Fatalf("BASEFEE opcode stored %x, want %x (this block's real BaseFee %d)", got, want, b2.Header.BaseFee)
+	}
+}
