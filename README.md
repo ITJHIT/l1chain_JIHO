@@ -17,8 +17,9 @@ Two companion repos round out the portfolio this belongs to: [`lowlat-oms-core`]
 │        ▼                               ▼                             │
 │  node/  ── mempool · miner · RWMutex-guarded state access           │
 │    │                                                                │
-│    ├── chain/     block linkage · longest-chain reorg · state trans.│
-│    ├── consensus/ PoW · difficulty retarget (~10s)                  │
+│    ├── chain/     block linkage · finality gate · state trans.      │
+│    ├── consensus/ PoW (default) or PoS, selected once at genesis [M8]│
+│    ├── pos/       BLS12-381 validators · proposer · attest  [M8]     │
 │    ├── p2p/       libp2p host · gossipsub · /l1/sync stream          │
 │    ├── vm/        custom stack VM (gas, storage, CALL)   [M3]        │
 │    ├── evm/       embedded go-ethereum EVM · ERC-20      [M4]        │
@@ -51,10 +52,11 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 | **M5** | Real from-scratch SHA-256 Merkle Patricia Trie (two-level: world trie + per-account storage tries) replacing the placeholder flat-hash state root; light-client account/storage proofs over RPC + independent CLI verification; a genuine 3-container Docker Compose testnet with real libp2p peer discovery; eclipse-attack + inbound-sync-flood defenses (`ConnectionManager`, stream cap) with adversarial tests proven to fail without them | ✅ done |
 | **M6** | Genesis base-asset premine closing the on-chain exchange's last gap (a real crossing trade proven over the full `node.New` → RPC → `MineBlock` round trip); DHT peer discovery + circuit-relay-v2 P2P; real solc-compiled OpenZeppelin ERC20 + precompile calls through the EVM harness, frozen with CI-verified drift detection | ✅ done |
 | **M7** | EVM/MPT unification: a new `evm/adapter` package bridges l1chain's own real SHA-256 MPT `state.StateDB` to go-ethereum's full 39-method `vm.StateDB` (snapshots/revert, refunds, self-destruct incl. EIP-6780, transient storage, access lists, `Finalise`), wired directly into `chain/transition.go` — a deployed EVM contract (`evm.DeployAddress`, magic-tag-dispatched) now executes as real chain consensus, not just an isolated harness. Two fully independent `*Chain` instances (one mining via `CandidateStateRoot`, one only ever validating via `AddBlock`) proven to agree on state root over a real EVM workload (a real solc-compiled ERC20 deploy, a nested call with a genuine mid-call revert, a same-tx self-destruct) | ✅ done |
+| **M8** | Full Proof-of-Stake consensus mode, additive alongside PoW (a genesis-fixed choice, mirroring the on-chain exchange's own mode switch — PoW stays the default and every pre-existing PoW test is unaffected). Real stake-weighted block production (not a finality overlay on unchanged PoW blocks): BLS12-381 (`blst`) validator signing and aggregable checkpoint attestations, deterministic stake-weighted proposer selection, a finality gate that runs *before* the heaviest-chain reorg rule and rejects any competing branch once ≥2/3 of stake has finalized a checkpoint — even if that branch is nominally heavier — and equivocation detection (double-propose, double-attest) that jails a validator out of future proposer/attestation eligibility. See [Proof-of-Stake consensus](#proof-of-stake-consensus) below | ✅ done |
 
 ## Features
 
-- **Consensus** — Bitcoin-style Proof-of-Work with leading-zero-bit targets, difficulty retargeting toward a ~10s block interval, and longest-(heaviest-)chain reorg with full state replay.
+- **Consensus** — dual-mode, chosen once at genesis and never touched again (same shape as the on-chain exchange's own mode switch): Bitcoin-style Proof-of-Work by default (leading-zero-bit targets, difficulty retargeting toward a ~10s block interval, longest-(heaviest-)chain reorg with full state replay), or a full Proof-of-Stake mode (M8) — deterministic stake-weighted proposers, BLS12-381 aggregable attestations, and ≥2/3-stake finality. See [Proof-of-Stake consensus](#proof-of-stake-consensus) below.
 - **Native coin** — account/balance model, ECDSA secp256k1 signatures, genesis allocation, fixed block reward (coinbase credited into canonical state), infinite supply.
 - **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps, a connection-count watermark, and an inbound-sync-stream cap as of M5) against slow/malicious/many-sybil peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
 - **Smart contracts** — a from-scratch stack VM (M3) with Ethereum-numbered opcodes, gas, out-of-gas revert, and CALL depth limits; plus an embedded go-ethereum EVM (M4) that deploys and runs a standard ERC-20 with keccak-derived mapping storage.
@@ -131,6 +133,40 @@ haven't received node1's advertised multiaddr yet). By attempt 2 all three
 already agree at height 1; by attempt 3 all three agree at height 3, hash
 and all. ([full job log](https://github.com/ITJHIT/l1chain_JIHO/actions/runs/30559467454/job/90928429823))
 
+### Proof-of-Stake (PoS) mode
+
+Everything above defaults to PoW. A PoS chain instead needs a genesis-fixed
+validator set — each entry pairs a validator's ordinary secp256k1 address
+(the same identity `--miner-key` already provides, reused as proposer
+identity) with its BLS public key and stake. Since both keys are normally
+freshly generated, the natural flow is to generate first, then start the
+real node with those identities registered:
+
+```bash
+# generate the two identities first: --consensus pos with no --validators
+# prints a fresh miner key and a fresh BLS key, then exits with
+# ErrPoSRequiresValidators (no validator set registered yet) --
+#   generated miner key: 3f2a... (address 0xabc...)
+#   generated validator BLS key: 9e1c... (pubkey 0x8f4...)
+go run ./cmd/l1 node --consensus pos
+
+# a single self-proposing PoS node, using the identities printed above (its
+# own validator is the only one registered, so it is selected for every slot)
+go run ./cmd/l1 node --rpc-addr 127.0.0.1:8545 \
+  --consensus pos --slot-interval 2s \
+  --miner-key <generated-miner-key-hex> \
+  --validator-bls-key <generated-bls-key-hex> \
+  --validators <address-hex>:<bls-pubkey-hex>:100
+```
+
+`--validators` takes `addrHex:blsPubKeyHex:stake` pairs (comma-separated for
+multiple validators), mirroring `--alloc`'s own parser. A node started with
+`--validator-bls-key` omitted (or a key that doesn't match any registered
+validator) only ever follows/validates PoS blocks and never proposes or
+attests — mirrors `--miner-key`'s existing "empty = generate" convention on
+the PoW side. See [Proof-of-Stake consensus](#proof-of-stake-consensus)
+below for the full design and its named limitations.
+
 ### Block explorer
 
 ```bash
@@ -156,6 +192,7 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - `m5-p2p-hardening-redteam-report.json` — eclipse attempt (many sybil peer connections, bounded by a real libp2p connection manager), inbound sync-stream flood (bounded by a per-node concurrency cap), liveness preserved under both
 - `m6-evm-solc-redteam-report.json` — real solc-compiled OpenZeppelin ERC20 deploy/mint/transfer with a real `Transfer` event and a real `Ownable` revert path, plus a real precompile-0x1 (`ecrecover`) call, both through genuine solc bytecode with CI-verified drift detection against the source
 - `m7-evm-unification-redteam-report.json` — out-of-gas deploy, revert integrity, reentrancy bound, and cross-chain deterministic root, all proven at the real wired-consensus EVM path (`chain.ApplyTxAt`/`AddBlock`, not just the standalone harness M4/M6 exercised)
+- `m8-pos-redteam-report.json` — forged proposer signature (correct claimed identity, wrong/garbage signature) and forged attestation signature both rejected; plus the four required PoS wiring-PR safety tests cited by name (wrong-proposer block, finality gate rejecting a nominally-heavier conflicting branch, double-propose jailing, double-attest jailing), all real CI evidence from the same run that proves the full pre-existing PoW suite unaffected
 
 ## Design notes
 
@@ -231,6 +268,93 @@ having to know much about the other.
   funded sell and a funded buy cross in the same block, and the clear
   (`getLastAuction`), both parties' settled balances, and the now-flat
   order book are all read back over real HTTP, not asserted in-process.
+
+## Proof-of-Stake consensus
+
+A full, real stake-weighted alternative to PoW — not a lightweight finality
+overlay bolted onto unchanged PoW block production — selected once at genesis
+and never touched again, exactly like the on-chain exchange's own
+`Chain.SetExchangeMode`. Every pre-existing PoW test is unaffected: a PoW
+block's `Header.ProposerSig` stays nil forever, so its hash preimage is
+byte-for-byte identical to before M8.
+
+- **Validator identity is BLS12-381** (`github.com/supranational/blst`, the
+  min-pk convention — pubkeys in G1/48 bytes compressed, signatures in G2/96
+  bytes compressed), chosen specifically for its aggregation properties:
+  Ethereum's own beacon chain uses BLS over ECDSA for exactly this reason. A
+  validator holds two separate keys — its existing secp256k1 identity
+  (`--miner-key`, reused as `Header.Coinbase`/proposer identity, unchanged
+  from PoW) and a new BLS key (`--validator-bls-key`) that signs blocks and
+  attestations.
+- **Proposer selection is deterministic and stake-weighted** — a "roulette
+  wheel" over each height's active validator set, seeded by
+  `hash(parentHash, height)`. Two fully independent `*Chain` instances (one
+  proposing, one only ever validating via `AddBlock`) are proven to agree on
+  both the selected proposer and the resulting state root after every block.
+  **Named limitation**: this seed is *not* an unbiased, grinding-resistant
+  randomness beacon (no VRF/RANDAO) — the proposer of block *N* fully
+  determines the parent hash block *N+1*'s seed derives from, the moment
+  they decide whether to publish. A single-block-lookahead grinding option
+  exists; a real randomness beacon is out of scope for M8.
+- **Attestations are ordinary signed transactions** to a reserved
+  `pos.AttestAddress` (the same "an order is an ordinary transaction" shape
+  the on-chain exchange uses) — replay protection, mempool admission, and
+  P2P gossip come for free, no gossip-layer changes needed. Every 32 blocks
+  (`pos.CheckpointInterval`) is a checkpoint validators vote on; a vote can
+  only ride in a block *after* the checkpoint it targets, since a block
+  cannot reference its own not-yet-determined hash.
+- **Finality is a hard safety gate, not a heavier-chain tiebreaker.** Once
+  ≥2/3 of stake has attested to a checkpoint, `Chain.AddBlock` rejects *any*
+  block whose ancestry doesn't pass through it — checked *before* the
+  existing heaviest-chain reorg rule ever runs, so a conflicting branch can
+  never even begin to accumulate weight, let alone win a `td` comparison.
+  Proven directly: a branch forking before a finalized checkpoint, made
+  deliberately *heavier* by raw accumulated weight than the finalized
+  branch's own early history, is still rejected on two independent chain
+  instances.
+- **Equivocation is detected and jailed, not economically slashed.**
+  Double-proposing (two different valid blocks for the same parent) and
+  double-attesting (two conflicting votes for the same checkpoint round) are
+  both detected in `AddBlock` and immediately exclude the validator from
+  future proposer selection and future attestation tallies — confirmed by
+  test, not just logged. No stake burn/seizure: M8's stake is immutable
+  genesis config, not a mutable balance, so there is nothing to seize
+  without reopening live-deposit scope (see deferred list below).
+- **PoW is fully preserved as a selectable legacy mode.** `consensus.Mode`
+  defaults to `PoW`; every one of the ~100+ pre-existing PoW tests passes
+  unchanged, in the same CI run as every new PoS test.
+
+See [`m8-pos-redteam-report.json`](artifacts/m8-pos-redteam-report.json) for
+adversarial evidence (forged proposer/attestation signatures) plus the
+required safety-test citations, and the [PoS quickstart](#proof-of-stake-pos-mode)
+above for a runnable example.
+
+**Explicitly deferred for M8** (stated plainly, not silently avoided):
+
+- No VRF/RANDAO-style unbiased randomness beacon (see the named grinding
+  limitation above).
+- No liveness/skip-slot mechanism — if the selected proposer for a height is
+  offline, block production stalls at that height indefinitely. The single
+  biggest liveness limitation of this design.
+- No dynamic validator set — validators are genesis-fixed; no live deposit,
+  activation delay, exit queue, or unbonding.
+- No economic slashing — detection + jailing only, not stake burn/seizure.
+- No cross-shard/sharding, no weak-subjectivity checkpoints, no
+  light-client sync-committee-style proofs for PoS finality (existing MPT
+  account/storage proofs are unrelated to this).
+- No gossip-layer signature verification for PoS blocks — `blockTopicValidator`
+  only checks structural shape (`len(ProposerSig) == pos.SignatureSize`) at
+  the gossip layer, since it has no chain/validator-set reference today. Real
+  verification is never skipped — it's just not pre-filtered pre-propagation
+  the way PoW's `MeetsTarget` check is; it always runs, un-skippable, in
+  `AcceptExternalBlock → AddBlock`.
+- A narrow attestation-persistence gap: `AddBlock` tallies attestations for
+  every accepted block (canonical or not, by design — this permanence is
+  what makes finality survive a later reorg), but `store.Load` only replays
+  the canonical branch on restart. A long-lived process and a freshly
+  restarted one can end up with slightly different finality/jailing state,
+  specifically for attestations that were only ever included in a since-
+  orphaned block.
 
 ## Hardening (post-M4)
 
