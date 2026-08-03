@@ -26,6 +26,12 @@ type Genesis struct {
 	BaseAlloc  map[core.Address]uint64
 	Difficulty uint32 // difficulty carried in the genesis header
 	Timestamp  int64  // genesis header timestamp
+
+	// InitialBaseFee (M9) seeds the genesis header's BaseFee -- there is no
+	// parent block to derive it from (chain.ComputeBaseFee needs a parent),
+	// exactly like real EIP-1559's own London bootstrap rule. The genesis
+	// block carries no transactions, so GasUsed is always 0 regardless.
+	InitialBaseFee uint64
 }
 
 // ApplyGenesis funds the alloc accounts into st and returns the genesis block
@@ -46,6 +52,7 @@ func ApplyGenesis(st state.StateDB, g Genesis) core.Block {
 		Height:     0,
 		Timestamp:  g.Timestamp,
 		Difficulty: g.Difficulty,
+		BaseFee:    g.InitialBaseFee,
 	}
 	h.StateRoot = st.StateRoot()
 	b := core.Block{Header: h}

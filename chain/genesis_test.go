@@ -91,6 +91,62 @@ func TestNewChainWithAllocMatchesGenesisStateRoot(t *testing.T) {
 	}
 }
 
+// TestGenesisInitialBaseFeeSeedsHeaderBaseFee proves InitialBaseFee (M9)
+// actually reaches the genesis header -- there is no parent block to derive
+// BaseFee from (chain.ComputeBaseFee needs one), so genesis must seed it
+// directly, exactly like Difficulty already does.
+func TestGenesisInitialBaseFeeSeedsHeaderBaseFee(t *testing.T) {
+	g := Genesis{
+		Alloc:          map[core.Address]uint64{addr(1): 1000},
+		Difficulty:     6,
+		Timestamp:      1000,
+		InitialBaseFee: 42,
+	}
+	blk := g.ToBlock()
+	if blk.Header.BaseFee != 42 {
+		t.Fatalf("genesis BaseFee = %d, want 42", blk.Header.BaseFee)
+	}
+	if blk.Header.GasUsed != 0 {
+		t.Fatalf("genesis GasUsed = %d, want 0 (no transactions)", blk.Header.GasUsed)
+	}
+}
+
+// TestGenesisZeroInitialBaseFeeIsExplicitZero proves the zero value is a real,
+// unconfigured-genesis default (no accidental fallback), matching every other
+// Genesis field's own zero-value behavior (Difficulty/Timestamp default to 0
+// exactly the same way).
+func TestGenesisZeroInitialBaseFeeIsExplicitZero(t *testing.T) {
+	g := Genesis{Alloc: map[core.Address]uint64{addr(1): 1000}}
+	if got := g.ToBlock().Header.BaseFee; got != 0 {
+		t.Fatalf("genesis BaseFee with unset InitialBaseFee = %d, want 0", got)
+	}
+}
+
+// TestNewChainDefaultsToDefaultGasLimit mirrors chainID's own default-value
+// precedent (NewChainWithAlloc initializes chainID: DefaultChainID) for the
+// M9 gasLimit field.
+func TestNewChainDefaultsToDefaultGasLimit(t *testing.T) {
+	alloc := map[core.Address]uint64{addr(1): 1000}
+	g := Genesis{Alloc: alloc, Difficulty: 6, Timestamp: 1000}
+	c := NewChain(g.ToBlock(), alloc)
+	if got := c.GasLimit(); got != DefaultGasLimit {
+		t.Fatalf("GasLimit() = %d, want DefaultGasLimit (%d)", got, DefaultGasLimit)
+	}
+}
+
+// TestSetGasLimitOverridesDefault mirrors SetChainID's own override
+// precedent: set once, immediately after NewChain, same as node.New does for
+// Config.ChainID.
+func TestSetGasLimitOverridesDefault(t *testing.T) {
+	alloc := map[core.Address]uint64{addr(1): 1000}
+	g := Genesis{Alloc: alloc, Difficulty: 6, Timestamp: 1000}
+	c := NewChain(g.ToBlock(), alloc)
+	c.SetGasLimit(100_000)
+	if got := c.GasLimit(); got != 100_000 {
+		t.Fatalf("GasLimit() after SetGasLimit(100_000) = %d, want 100_000", got)
+	}
+}
+
 func TestApplyGenesisFundsBaseAllocAndStateRoot(t *testing.T) {
 	g := Genesis{
 		Alloc:      map[core.Address]uint64{addr(1): 1000},

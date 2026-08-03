@@ -60,6 +60,14 @@ var (
 // via node.Config.ChainID / Chain.SetChainID.
 const DefaultChainID uint64 = 1337
 
+// DefaultGasLimit is the block gas cap (M9) used unless explicitly overridden
+// via Chain.SetGasLimit -- the fixed, genesis-configured ceiling on total gas
+// consumed by a single block's fee-priced (contract/EVM) transactions.
+// GasTarget (chain.GasTarget, half of this) is the equilibrium BaseFee
+// adjusts toward; a block may go up to this full cap before BaseFee starts
+// correcting it back down (ElasticityMultiplier = 2, same as real EIP-1559).
+const DefaultGasLimit uint64 = 8_000_000
+
 // Chain is an in-memory block store implementing longest-chain (heaviest
 // cumulative difficulty) consensus with reorg. It keeps every valid block it has
 // seen keyed by hash, the cumulative difficulty of each block, the current head,
@@ -82,6 +90,15 @@ type Chain struct {
 	headState   state.StateDB
 	heightIndex map[uint64]core.Hash // canonical height -> block hash
 	chainID     uint64               // replay-protection domain enforced on every tx
+
+	// gasLimit (M9) is the block gas cap enforced on fee-priced (contract/
+	// EVM) transactions -- set once, immediately after NewChain(WithAlloc),
+	// same "never touched again" discipline as chainID: chain.ComputeBaseFee
+	// replay-derives BaseFee from parent headers using whatever gasLimit is
+	// current, so changing it after blocks already exist would make
+	// historical blocks re-derive under a different target than the one
+	// they were actually produced and validated under.
+	gasLimit uint64
 
 	// exchangeMode governs every block's exchange transactions, mining and
 	// validation alike -- the zero value is exchange.Continuous, so a chain
@@ -237,6 +254,7 @@ func NewChainWithAlloc(genesis core.Block, alloc, baseAlloc map[core.Address]uin
 		td:               make(map[core.Hash]uint64),
 		heightIndex:      make(map[uint64]core.Hash),
 		chainID:          DefaultChainID,
+		gasLimit:         DefaultGasLimit,
 		attestedRound:    make(map[uint64]map[core.Address]core.Hash),
 		checkpointStake:  make(map[core.Hash]uint64),
 		jailed:           make(map[core.Address]bool),
@@ -275,6 +293,15 @@ func (c *Chain) SetChainID(id uint64) { c.chainID = id }
 
 // ChainID returns the chain's configured replay-protection domain.
 func (c *Chain) ChainID() uint64 { return c.chainID }
+
+// SetGasLimit overrides the block gas cap (M9) enforced on fee-priced
+// (contract/EVM) transactions. Set once, immediately after NewChain(WithAlloc)
+// -- see gasLimit's own doc comment for why changing it later would corrupt
+// replay.
+func (c *Chain) SetGasLimit(limit uint64) { c.gasLimit = limit }
+
+// GasLimit returns the chain's configured block gas cap (M9).
+func (c *Chain) GasLimit() uint64 { return c.gasLimit }
 
 // assertChainID is the single authoritative replay-protection rule. Both the
 // mining path (CandidateStateRoot) and the validation path (AddBlock) call it on
