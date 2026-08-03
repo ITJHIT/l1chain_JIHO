@@ -25,6 +25,74 @@ func TestTxHashFieldSensitivity(t *testing.T) {
 	}
 }
 
+// TestTxHashFieldSensitivityGasFeeCapGasTipCap proves the M9 fee fields are
+// genuinely signed over -- a tampered GasFeeCap or GasTipCap must change
+// SigningHash, exactly like GasLimit already does, so neither can be altered
+// post-signature without invalidating the signature.
+func TestTxHashFieldSensitivityGasFeeCapGasTipCap(t *testing.T) {
+	base := Transaction{Value: 5, Nonce: 1, GasLimit: 100, GasFeeCap: 10, GasTipCap: 2}
+	signing := base.SigningHash()
+
+	feeCapChanged := base
+	feeCapChanged.GasFeeCap = 11
+	if feeCapChanged.SigningHash() == signing {
+		t.Fatal("SigningHash must change when GasFeeCap changes")
+	}
+
+	tipCapChanged := base
+	tipCapChanged.GasTipCap = 3
+	if tipCapChanged.SigningHash() == signing {
+		t.Fatal("SigningHash must change when GasTipCap changes")
+	}
+}
+
+// TestTxSigningHashIncludesGasFeeCapAndGasTipCap independently re-derives the
+// M9 10-field encoding by hand (mirrors
+// TestEmptyProposerSigLeavesHashFormulaUnchanged's own re-derivation style
+// for Header/ProposerSig) rather than merely asserting by inspection that the
+// new fields were added somewhere in the preimage.
+func TestTxSigningHashIncludesGasFeeCapAndGasTipCap(t *testing.T) {
+	tx := Transaction{
+		From:      Address{1},
+		To:        Address{2},
+		Value:     100,
+		Nonce:     3,
+		GasLimit:  50000,
+		ChainID:   1337,
+		GasFeeCap: 20,
+		GasTipCap: 5,
+		Data:      []byte("payload"),
+	}
+	var buf []byte
+	buf = append(buf, tx.From[:]...)
+	buf = append(buf, tx.To[:]...)
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], tx.Value)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], tx.Nonce)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], tx.GasLimit)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], tx.ChainID)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], tx.GasFeeCap)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], tx.GasTipCap)
+	buf = append(buf, n[:]...)
+	buf = append(buf, tx.Data...)
+
+	want := SumHash(buf)
+	if got := tx.SigningHash(); got != want {
+		t.Fatalf("SigningHash() = %x, want %x (independently re-derived 10-field encoding)", got, want)
+	}
+
+	tx.Signature = []byte{0xaa, 0xbb}
+	wantWithSig := SumHash(append(append([]byte{}, buf...), tx.Signature...))
+	if got := tx.Hash(); got != wantWithSig {
+		t.Fatalf("Hash() = %x, want %x", got, wantWithSig)
+	}
+}
+
 func TestBlockTxRootMatchesMerkle(t *testing.T) {
 	b := Block{Txs: []Transaction{{Value: 1}, {Value: 2}}}
 	leaves := []Hash{b.Txs[0].Hash(), b.Txs[1].Hash()}

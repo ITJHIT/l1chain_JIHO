@@ -12,6 +12,8 @@ type Transaction struct {
 	Nonce     uint64
 	GasLimit  uint64
 	ChainID   uint64 // replay-domain separator; the signature covers it (see preimage)
+	GasFeeCap uint64 // M9: hard ceiling, sender never pays more than this per gas unit
+	GasTipCap uint64 // M9: priority fee offered to the block producer, per gas unit
 	Data      []byte
 	Signature []byte
 }
@@ -22,14 +24,17 @@ type Transaction struct {
 // Byte layout (all integers big-endian, fixed width):
 //
 //	From(20) || To(20) || Value(u64) || Nonce(u64) || GasLimit(u64) ||
-//	ChainID(u64) || Data [ || Signature ]
+//	ChainID(u64) || GasFeeCap(u64) || GasTipCap(u64) || Data [ || Signature ]
 //
 // ChainID sits at a FIXED position right after GasLimit and before Data, so the
 // signature (taken over SigningHash = preimage(withSig=false)) commits to the
 // chain id: a signature produced for chain A cannot be replayed on chain B
 // because B's transactions hash a different ChainID and thus a different digest.
+// GasFeeCap/GasTipCap (M9) sit right after ChainID, signed over the same way --
+// a sender commits to its own fee ceiling and priority offer; neither can be
+// tampered with post-signature, exactly like GasLimit already couldn't be.
 func (t *Transaction) preimage(withSig bool) []byte {
-	buf := make([]byte, 0, 20+20+8+8+8+8+len(t.Data)+len(t.Signature))
+	buf := make([]byte, 0, 20+20+8+8+8+8+8+8+len(t.Data)+len(t.Signature))
 	buf = append(buf, t.From[:]...)
 	buf = append(buf, t.To[:]...)
 	var n [8]byte
@@ -40,6 +45,10 @@ func (t *Transaction) preimage(withSig bool) []byte {
 	binary.BigEndian.PutUint64(n[:], t.GasLimit)
 	buf = append(buf, n[:]...)
 	binary.BigEndian.PutUint64(n[:], t.ChainID)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], t.GasFeeCap)
+	buf = append(buf, n[:]...)
+	binary.BigEndian.PutUint64(n[:], t.GasTipCap)
 	buf = append(buf, n[:]...)
 	buf = append(buf, t.Data...)
 	if withSig {
