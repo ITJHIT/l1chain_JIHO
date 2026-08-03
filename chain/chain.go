@@ -53,6 +53,12 @@ var (
 	// conflicts with it can ever become canonical again, regardless of how
 	// much raw weight it accumulates (see respectsFinality).
 	ErrConflictsWithFinalized = errors.New("chain: block conflicts with an already-finalized checkpoint")
+	// ErrBadBaseFee is returned by AddBlock (M9) when a block's Header.BaseFee
+	// does not match the protocol-computed value derived from the parent
+	// header (see ComputeBaseFee) -- the fee-market analog of ErrBadPoW/
+	// ErrWrongProposer: BaseFee is never chosen freely, only independently
+	// re-derived and checked, identically by every validator.
+	ErrBadBaseFee = errors.New("chain: block BaseFee does not match the protocol-computed value")
 )
 
 // DefaultChainID is the replay-protection domain used by genesis and every
@@ -303,6 +309,17 @@ func (c *Chain) SetGasLimit(limit uint64) { c.gasLimit = limit }
 // GasLimit returns the chain's configured block gas cap (M9).
 func (c *Chain) GasLimit() uint64 { return c.gasLimit }
 
+// NextBaseFee returns the BaseFee the next block (built on the current head)
+// must carry -- the same deterministic derivation AddBlock independently
+// re-checks on every incoming block (ComputeBaseFee against the head
+// header's own BaseFee/GasUsed and this chain's configured GasTarget).
+// CandidateStateRoot calls this internally; a block builder (M9 PR8) calls
+// it directly to price/filter candidate transactions before building.
+func (c *Chain) NextBaseFee() uint64 {
+	head := c.blocks[c.head]
+	return ComputeBaseFee(head.Header.BaseFee, head.Header.GasUsed, GasTarget(c.gasLimit))
+}
+
 // assertChainID is the single authoritative replay-protection rule. Both the
 // mining path (CandidateStateRoot) and the validation path (AddBlock) call it on
 // the block/candidate transactions, so mining and validation accept exactly the
@@ -341,8 +358,10 @@ func (c *Chain) chainTo(hash core.Hash) ([]core.Block, bool) {
 }
 
 // applyBlockRewarded applies every transaction in b to st in order, then credits
-// BlockReward to b.Header.Coinbase (the miner). The genesis block (height 0) is
-// never rewarded. It mutates st in place and returns the first tx error.
+// BlockReward (plus M9's own fee-priced-transaction tip total) to
+// b.Header.Coinbase (the miner). The genesis block (height 0) is never
+// rewarded. It mutates st in place and returns the gas used by b's fee-priced
+// (contract/EVM) transactions, or the first tx error.
 //
 // Transactions go through applyTxsAt with b's real height and the given
 // exchange mode -- the ONLY path a real block takes on the way into canonical
@@ -351,16 +370,22 @@ func (c *Chain) chainTo(hash core.Hash) ([]core.Block, bool) {
 // test in isolation but collides the identity of every order ever placed on
 // the chain -- Cancel could no longer tell one user's resting order from
 // another's. (It did, for one commit's worth of this repository's history.)
-func applyBlockRewarded(st state.StateDB, b core.Block, verifySig func(core.Transaction) bool, mode exchange.Mode) error {
-	if err := applyTxsAt(st, b.Txs, verifySig, b.Header.Height, mode); err != nil {
-		return err
+//
+// baseFee (M9) is b's own BaseFee -- the caller is responsible for having
+// already validated it (AddBlock does, via ErrBadBaseFee, before calling
+// this; deriveState's replay loop passes each already-committed ancestor's
+// own BaseFee, trusted from when it was first validated).
+func applyBlockRewarded(st state.StateDB, b core.Block, verifySig func(core.Transaction) bool, mode exchange.Mode, baseFee uint64) (uint64, error) {
+	gasUsed, tip, err := applyTxsAt(st, b.Txs, verifySig, b.Header.Height, mode, baseFee)
+	if err != nil {
+		return 0, err
 	}
 	if b.Header.Height != 0 {
 		acct := st.GetAccount(b.Header.Coinbase)
-		acct.Balance += BlockReward
+		acct.Balance += BlockReward + tip
 		st.SetAccount(b.Header.Coinbase, acct)
 	}
-	return nil
+	return gasUsed, nil
 }
 
 // deriveState replays transactions and block rewards from genesis up to (and
@@ -373,7 +398,11 @@ func (c *Chain) deriveState(hash core.Hash, verifySig func(core.Transaction) boo
 	}
 	st := c.fundGenesis()
 	for i := 1; i < len(path); i++ { // skip genesis (no txs, no reward)
-		if err := applyBlockRewarded(st, path[i], verifySig, c.exchangeMode); err != nil {
+		// Each ancestor's own already-committed, already-validated BaseFee
+		// (see applyBlockRewarded's own doc comment) -- trusted replay of
+		// history, not re-validation; deriveState doesn't re-check each
+		// ancestor's StateRoot during replay either.
+		if _, err := applyBlockRewarded(st, path[i], verifySig, c.exchangeMode, path[i].Header.BaseFee); err != nil {
 			return nil, err
 		}
 	}
@@ -381,32 +410,38 @@ func (c *Chain) deriveState(hash core.Hash, verifySig func(core.Transaction) boo
 }
 
 // CandidateStateRoot derives the state root that results from applying txs on
-// top of the current canonical head plus a BlockReward credit to coinbase,
-// WITHOUT mutating canonical state. It replays from genesis into a fresh state
-// (exactly like AddBlock's re-derivation) so the returned root is precisely
-// what AddBlock will re-derive and validate for a block carrying these txs.
-// This is the mining/validation determinism seam: miners call this to fill
-// Header.StateRoot; validators re-run the identical path in AddBlock.
-func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address, verifySig func(core.Transaction) bool) (core.Hash, error) {
+// top of the current canonical head plus a BlockReward (+ M9 tip) credit to
+// coinbase, WITHOUT mutating canonical state. It replays from genesis into a
+// fresh state (exactly like AddBlock's re-derivation) so the returned root is
+// precisely what AddBlock will re-derive and validate for a block carrying
+// these txs. This is the mining/validation determinism seam: miners call this
+// to fill Header.StateRoot (and, as of M9, Header.GasUsed via the returned
+// gasUsed); validators re-run the identical path in AddBlock.
+func (c *Chain) CandidateStateRoot(txs []core.Transaction, coinbase core.Address, verifySig func(core.Transaction) bool) (core.Hash, uint64, error) {
 	st, err := c.deriveState(c.head, verifySig)
 	if err != nil {
-		return core.Hash{}, err
+		return core.Hash{}, 0, err
 	}
 	if err := c.assertChainID(txs); err != nil {
-		return core.Hash{}, err
+		return core.Hash{}, 0, err
 	}
 	// The candidate block does not exist yet, so its height is derived rather
 	// than read from a header: one past the current head's. AddBlock enforces
 	// exactly this relationship (ErrBadHeight), so a miner using any other value
 	// here would compute a root AddBlock could never actually validate.
 	height := c.blocks[c.head].Header.Height + 1
-	if err := applyTxsAt(st, txs, verifySig, height, c.exchangeMode); err != nil {
-		return core.Hash{}, err
+	// NextBaseFee derives from the CURRENT head's header -- the same value
+	// AddBlock will independently re-derive from the same parent when this
+	// candidate is later submitted as a real block (ErrBadBaseFee otherwise).
+	baseFee := c.NextBaseFee()
+	gasUsed, tip, err := applyTxsAt(st, txs, verifySig, height, c.exchangeMode, baseFee)
+	if err != nil {
+		return core.Hash{}, 0, err
 	}
 	m := st.GetAccount(coinbase)
-	m.Balance += BlockReward
+	m.Balance += BlockReward + tip
 	st.SetAccount(coinbase, m)
-	return st.StateRoot(), nil
+	return st.StateRoot(), gasUsed, nil
 }
 
 // respectsFinality rejects any block whose ancestry does not pass through
@@ -566,6 +601,16 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	if b.Header.Height != parent.Header.Height+1 {
 		return ErrBadHeight
 	}
+	// BaseFee (M9) is never chosen freely -- independently re-derived from
+	// the parent header and checked here, the fee-market analog of the
+	// PoW/PoS proposer checks below (ErrBadPoW/ErrWrongProposer). Checked
+	// before those since it applies identically regardless of consensus
+	// mode, and must be trustworthy before it's used to price this block's
+	// own transactions further down.
+	expectedBaseFee := ComputeBaseFee(parent.Header.BaseFee, parent.Header.GasUsed, GasTarget(c.gasLimit))
+	if b.Header.BaseFee != expectedBaseFee {
+		return ErrBadBaseFee
+	}
 	if err := c.respectsFinality(b); err != nil {
 		return err
 	}
@@ -619,9 +664,17 @@ func (c *Chain) AddBlock(b core.Block, verifySig func(core.Transaction) bool) er
 	if err != nil {
 		return err
 	}
-	if err := applyBlockRewarded(st, b, verifySig, c.exchangeMode); err != nil {
+	// b.Header.BaseFee is now validated (ErrBadBaseFee check above), so it is
+	// trustworthy to use for pricing this block's own transactions.
+	gasUsed, err := applyBlockRewarded(st, b, verifySig, c.exchangeMode, b.Header.BaseFee)
+	if err != nil {
 		return err
 	}
+	// gasUsed (M9) is captured but not yet validated against b.Header.GasUsed
+	// or c.gasLimit -- that check is a separate safety property, added by a
+	// later PR (mirrors M8's own split of proposer validity from finality
+	// safety across two PRs, both touching AddBlock).
+	_ = gasUsed
 	if st.StateRoot() != b.Header.StateRoot {
 		return ErrBadStateRoot
 	}

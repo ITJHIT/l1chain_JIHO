@@ -91,7 +91,11 @@ func TestAdvEVMWiring01OutOfGasDeployLeavesNoCodeAndConsumesFullGas(t *testing.T
 	c := NewChain(gb, alloc)
 
 	const tinyGas = 1_000 // real ERC20 construction needs vastly more
-	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: tinyGas, ChainID: DefaultChainID, Data: buildERC20DeployCode(t), Signature: []byte{1}}
+	// GasFeeCap/GasTipCap both 1 (M9): with this chain's BaseFee staying 0
+	// (InitialBaseFee never set), effectivePrice = 0 + min(1, 1-0) = 1,
+	// exactly matching the pre-M9 flat GasPrice=1 cost this test's exact
+	// balance assertion below depends on.
+	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: tinyGas, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: buildERC20DeployCode(t), Signature: []byte{1}}
 	deployedAddr := evmCreateAddr(sender, 0)
 
 	b := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx})
@@ -126,7 +130,10 @@ func TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged(t *testing.T) {
 	gb := g.ToBlock()
 	c := NewChain(gb, alloc)
 
-	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: 200_000, ChainID: DefaultChainID, Data: evmInitCode(evmSstoreThenRevertRuntime), Signature: []byte{1}}
+	// GasFeeCap/GasTipCap both 1 (M9): see case 1's own comment -- required
+	// here too, since this test's own balance assertion below requires SOME
+	// nonzero gas cost to have genuinely been charged.
+	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: 200_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmSstoreThenRevertRuntime), Signature: []byte{1}}
 	contractAddr := evmCreateAddr(sender, 0)
 	b1 := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx})
 	if err := c.AddBlock(b1, acceptAll); err != nil {
@@ -138,7 +145,7 @@ func TestAdvEVMWiring02RevertedCallLeavesStorageUnchanged(t *testing.T) {
 
 	const callGas = 100_000
 	balanceBeforeCall := c.State().GetAccount(sender).Balance
-	callTx := core.Transaction{From: sender, To: contractAddr, Nonce: 1, GasLimit: callGas, ChainID: DefaultChainID, Signature: []byte{1}}
+	callTx := core.Transaction{From: sender, To: contractAddr, Nonce: 1, GasLimit: callGas, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}}
 	b2 := mineExchangeBlock(t, c, b1, []core.Transaction{callTx})
 	if err := c.AddBlock(b2, acceptAll); err != nil {
 		t.Fatalf("AddBlock reverted call: a REVERTed EVM call must not be a block-validation error: %v", err)
@@ -177,7 +184,8 @@ func TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic(t *testing.T) {
 	gb := g.ToBlock()
 	c := NewChain(gb, alloc)
 
-	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: 200_000, ChainID: DefaultChainID, Data: evmInitCode(evmSelfReentrantRuntime), Signature: []byte{1}}
+	// GasFeeCap/GasTipCap both 1 (M9): see case 1's own comment.
+	deployTx := core.Transaction{From: sender, To: evm.DeployAddress, Nonce: 0, GasLimit: 200_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmSelfReentrantRuntime), Signature: []byte{1}}
 	contractAddr := evmCreateAddr(sender, 0)
 	b1 := mineExchangeBlock(t, c, gb, []core.Transaction{deployTx})
 	if err := c.AddBlock(b1, acceptAll); err != nil {
@@ -186,7 +194,7 @@ func TestAdvEVMWiring03ReentrancyBoundedNoHangNoPanic(t *testing.T) {
 	afterDeployBalance := c.State().GetAccount(sender).Balance
 
 	const callGas = 200_000
-	callTx := core.Transaction{From: sender, To: contractAddr, Nonce: 1, GasLimit: callGas, ChainID: DefaultChainID, Signature: []byte{1}}
+	callTx := core.Transaction{From: sender, To: contractAddr, Nonce: 1, GasLimit: callGas, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}}
 	b2 := mineExchangeBlock(t, c, b1, []core.Transaction{callTx})
 	if err := c.AddBlock(b2, acceptAll); err != nil {
 		t.Fatalf("AddBlock self-reentrant call: %v", err)
@@ -234,22 +242,26 @@ func TestAdvEVMWiring04AdversarialSequenceDeterministicAcrossIndependentChains(t
 	revertAddr := evmCreateAddr(sender, nonceRevertDeploy)
 	reentrantAddr := evmCreateAddr(sender, nonceReentrantDeploy)
 
+	// GasFeeCap/GasTipCap both 1 (M9) on every contract/EVM tx below, for
+	// consistency with cases 1-3 (see case 1's own comment) even though no
+	// assertion here depends on an exact fee amount -- the plain transfer
+	// (nonceTransfer) is fee-exempt regardless and carries neither field.
 	blocks := [][]core.Transaction{
 		// Block 1: OOG deploy of a real, sizeable contract under a tiny gas limit.
 		{
-			{From: sender, To: evm.DeployAddress, Nonce: nonceOOGDeploy, GasLimit: 1_000, ChainID: DefaultChainID, Data: buildERC20DeployCode(t), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceOOGDeploy, GasLimit: 1_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: buildERC20DeployCode(t), Signature: []byte{1}},
 		},
 		// Block 2: deploy the revert-on-call and self-reentrant contracts.
 		{
-			{From: sender, To: evm.DeployAddress, Nonce: nonceRevertDeploy, GasLimit: 200_000, ChainID: DefaultChainID, Data: evmInitCode(evmSstoreThenRevertRuntime), Signature: []byte{1}},
-			{From: sender, To: evm.DeployAddress, Nonce: nonceReentrantDeploy, GasLimit: 200_000, ChainID: DefaultChainID, Data: evmInitCode(evmSelfReentrantRuntime), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceRevertDeploy, GasLimit: 200_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmSstoreThenRevertRuntime), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceReentrantDeploy, GasLimit: 200_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmSelfReentrantRuntime), Signature: []byte{1}},
 		},
 		// Block 3: exercise both under real chain execution, interleaved with
 		// an ordinary plain transfer (the pre-existing dispatch path,
 		// unaffected in the same sequence).
 		{
-			{From: sender, To: revertAddr, Nonce: nonceRevertCall, GasLimit: 100_000, ChainID: DefaultChainID, Signature: []byte{1}},
-			{From: sender, To: reentrantAddr, Nonce: nonceReentrantCall, GasLimit: 200_000, ChainID: DefaultChainID, Signature: []byte{1}},
+			{From: sender, To: revertAddr, Nonce: nonceRevertCall, GasLimit: 100_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}},
+			{From: sender, To: reentrantAddr, Nonce: nonceReentrantCall, GasLimit: 200_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}},
 			{From: sender, To: recipient, Value: 100, Nonce: nonceTransfer, ChainID: DefaultChainID, Signature: []byte{1}},
 		},
 	}

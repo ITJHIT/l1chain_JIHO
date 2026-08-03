@@ -14,7 +14,17 @@ import (
 var testMiner = addr(9)
 
 // replayBranch reproduces the state after applying the txs of the given branch
-// (genesis excluded from txs) plus each block's coinbase reward on top of alloc.
+// (genesis excluded from txs) plus each block's coinbase reward (+ M9 tip) on
+// top of alloc.
+//
+// Uses applyTxAtSession directly (in-package access), not the public ApplyTx,
+// because ApplyTx deliberately discards the tip return value (see its own
+// doc comment) -- a real production block's Coinbase gets BlockReward + tip
+// (Chain.AddBlock's applyBlockRewarded), so a test helper reproducing that
+// same state via ApplyTx's tip-blind path would silently diverge from what
+// AddBlock re-derives whenever any tx in the branch carries a nonzero
+// GasTipCap, exactly the "shadow computation disagrees with production"
+// failure class this package's own history already warns about.
 func replayBranch(alloc map[core.Address]uint64, branch []core.Block) state.StateDB {
 	st := state.New()
 	for a, b := range alloc {
@@ -23,11 +33,13 @@ func replayBranch(alloc map[core.Address]uint64, branch []core.Block) state.Stat
 		st.SetAccount(a, acct)
 	}
 	for _, blk := range branch {
+		var tip uint64
 		for i := range blk.Txs {
-			_ = ApplyTx(st, blk.Txs[i], acceptAll)
+			_, tp, _ := applyTxAtSession(st, blk.Txs[i], acceptAll, blk.Header.Height, uint32(i), nil, blk.Header.BaseFee)
+			tip += tp
 		}
 		m := st.GetAccount(blk.Header.Coinbase)
-		m.Balance += BlockReward
+		m.Balance += BlockReward + tip
 		st.SetAccount(blk.Header.Coinbase, m)
 	}
 	return st
@@ -35,21 +47,31 @@ func replayBranch(alloc map[core.Address]uint64, branch []core.Block) state.Stat
 
 // buildBlock mines a valid block extending parent, given the prior blocks of the
 // same branch (used to compute the parent state) and this block's txs. The block
-// is mined for testMiner, whose coinbase reward is folded into the state root.
+// is mined for testMiner, whose coinbase reward (+ M9 tip) is folded into the
+// state root. BaseFee is left at its zero value -- every genesis these helpers
+// build uses InitialBaseFee's own zero default, so ComputeBaseFee(0, ...)
+// always returns 0 (see its own doc comment), matching AddBlock's expectation
+// exactly; see replayBranch's own doc comment for why the tip must be tracked
+// via applyTxAtSession directly, not the public ApplyTx.
 func buildBlock(parent core.Block, prior []core.Block, txs []core.Transaction, diff uint32, ts int64, alloc map[core.Address]uint64) core.Block {
 	st := replayBranch(alloc, prior)
+	height := parent.Header.Height + 1
+	var gasUsed, tip uint64
 	for i := range txs {
-		_ = ApplyTx(st, txs[i], acceptAll)
+		g, tp, _ := applyTxAtSession(st, txs[i], acceptAll, height, uint32(i), nil, 0)
+		gasUsed += g
+		tip += tp
 	}
 	m := st.GetAccount(testMiner)
-	m.Balance += BlockReward
+	m.Balance += BlockReward + tip
 	st.SetAccount(testMiner, m)
 	h := core.Header{
-		Height:     parent.Header.Height + 1,
+		Height:     height,
 		PrevHash:   parent.Hash(),
 		Coinbase:   testMiner,
 		Difficulty: diff,
 		Timestamp:  ts,
+		GasUsed:    gasUsed,
 	}
 	b := core.Block{Header: h, Txs: txs}
 	b.Header.MerkleRoot = b.TxRoot()

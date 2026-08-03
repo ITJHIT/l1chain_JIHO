@@ -26,15 +26,22 @@ import (
 // so the test can never independently drift from what AddBlock re-derives.
 func mineExchangeBlock(t *testing.T, c *Chain, parent core.Block, txs []core.Transaction) core.Block {
 	t.Helper()
-	root, err := c.CandidateStateRoot(txs, testMiner, acceptAll)
+	root, gasUsed, err := c.CandidateStateRoot(txs, testMiner, acceptAll)
 	if err != nil {
 		t.Fatalf("CandidateStateRoot: %v", err)
 	}
+	// BaseFee (M9) is derived from parent's own header, not c.NextBaseFee()
+	// (which reads the CHAIN's current head) -- parent here may not be the
+	// chain's canonical head (e.g. a test building an alternate branch), so
+	// this must be correct regardless of what AddBlock later does with it.
+	baseFee := ComputeBaseFee(parent.Header.BaseFee, parent.Header.GasUsed, GasTarget(c.GasLimit()))
 	h := core.Header{
 		Height:     parent.Header.Height + 1,
 		PrevHash:   parent.Hash(),
 		Coinbase:   testMiner,
 		Difficulty: testDiff,
+		BaseFee:    baseFee,
+		GasUsed:    gasUsed,
 	}
 	b := core.Block{Header: h, Txs: txs}
 	b.Header.MerkleRoot = b.TxRoot()
@@ -95,7 +102,7 @@ func TestOrderIdentityDoesNotCollideAcrossBlocksOnTheRealChainPath(t *testing.T)
 	// AddBlock at all. If ids had collided (both {0,0} pre-fix), this call
 	// would have succeeded, because the order it found by that id would have
 	// been indistinguishable from account 1's.
-	_, err := c.CandidateStateRoot([]core.Transaction{
+	_, _, err := c.CandidateStateRoot([]core.Transaction{
 		exCancelTx(addr(2), 1, idA),
 	}, testMiner, acceptAll)
 	if err == nil {

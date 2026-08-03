@@ -50,16 +50,22 @@ func proposePoSBlock(t *testing.T, c *Chain, vs *pos.ValidatorSet, keys map[core
 	if err != nil {
 		t.Fatalf("pos.SelectProposer: %v", err)
 	}
-	root, err := c.CandidateStateRoot(txs, selected.Address, acceptAll)
+	root, gasUsed, err := c.CandidateStateRoot(txs, selected.Address, acceptAll)
 	if err != nil {
 		t.Fatalf("CandidateStateRoot: %v", err)
 	}
+	// Derived from parent's own header (M9), not c.NextBaseFee() (the
+	// CHAIN's current head) -- parent may be an alternate branch's tip in
+	// some tests, so this must be correct regardless.
+	baseFee := ComputeBaseFee(parent.Header.BaseFee, parent.Header.GasUsed, GasTarget(c.GasLimit()))
 	h := core.Header{
 		Height:    height,
 		PrevHash:  parent.Hash(),
 		Coinbase:  selected.Address,
 		Timestamp: int64(height),
 		StateRoot: root,
+		BaseFee:   baseFee,
+		GasUsed:   gasUsed,
 	}
 	b := core.Block{Header: h, Txs: txs}
 	b.Header.MerkleRoot = b.TxRoot()
@@ -186,11 +192,12 @@ func TestPoSWrongProposerBlockRejected(t *testing.T) {
 		}
 	}
 
-	root, err := chainA.CandidateStateRoot(nil, wrong.Address, acceptAll)
+	root, gasUsed, err := chainA.CandidateStateRoot(nil, wrong.Address, acceptAll)
 	if err != nil {
 		t.Fatalf("CandidateStateRoot: %v", err)
 	}
-	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: wrong.Address, Timestamp: 1, StateRoot: root}
+	baseFee := ComputeBaseFee(gb.Header.BaseFee, gb.Header.GasUsed, GasTarget(chainA.GasLimit()))
+	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: wrong.Address, Timestamp: 1, StateRoot: root, BaseFee: baseFee, GasUsed: gasUsed}
 	b := core.Block{Header: h}
 	b.Header.MerkleRoot = b.TxRoot()
 	signingHash := b.Header.SigningHash()

@@ -52,11 +52,12 @@ func TestAdvPoS01ForgedProposerSignatureRejected(t *testing.T) {
 		t.Fatalf("SelectProposer: %v", err)
 	}
 
-	root, err := chainA.CandidateStateRoot(nil, selected.Address, acceptAll)
+	root, gasUsed, err := chainA.CandidateStateRoot(nil, selected.Address, acceptAll)
 	if err != nil {
 		t.Fatalf("CandidateStateRoot: %v", err)
 	}
-	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: selected.Address, Timestamp: 1, StateRoot: root}
+	baseFee := ComputeBaseFee(gb.Header.BaseFee, gb.Header.GasUsed, GasTarget(chainA.GasLimit()))
+	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: selected.Address, Timestamp: 1, StateRoot: root, BaseFee: baseFee, GasUsed: gasUsed}
 
 	// (a) Signed with a DIFFERENT validator's real key: the Coinbase claim
 	// (identity) is correct, but the signature does not actually come from

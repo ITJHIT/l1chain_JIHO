@@ -19,15 +19,9 @@ var (
 	// ErrInsufficientBalance is returned when the sender cannot cover Value.
 	ErrInsufficientBalance = errors.New("chain: insufficient balance")
 	// ErrCantAffordGas is returned when the sender cannot cover the up-front gas
-	// reservation (GasLimit * GasPrice) for a contract transaction.
+	// reservation (GasLimit * GasFeeCap) for a contract/EVM transaction.
 	ErrCantAffordGas = errors.New("chain: insufficient balance for gas")
 )
-
-// GasPrice is the native-coin price per unit of gas for contract transactions
-// (M3). It is a fixed constant so gas accounting is deterministic across nodes.
-// A failed/out-of-gas contract tx still consumes gas and advances the sender
-// nonce (EVM-ish semantics) but reverts all storage writes.
-const GasPrice uint64 = 1
 
 // BlockReward is the coinbase reward credited to a block's miner.
 const BlockReward uint64 = 50
@@ -57,8 +51,15 @@ func ApplyTx(st state.StateDB, tx core.Transaction, verifySig func(core.Transact
 //
 // ApplyTx forwards with (0, 0), which is correct for every non-exchange
 // transaction because none of them read the position.
+//
+// This standalone entrypoint has no chain/genesis to derive a fee-market
+// BaseFee from, so it prices any contract/EVM transaction at BaseFee=0 (pure
+// tip, no burn) -- documented, not silently arbitrary. A caller that wants
+// real fee-market pricing goes through Chain.AddBlock/CandidateStateRoot
+// instead, which always have a real parent header to derive BaseFee from.
 func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32) error {
-	return applyTxAtSession(st, tx, verifySig, height, index, nil)
+	_, _, err := applyTxAtSession(st, tx, verifySig, height, index, nil, 0)
+	return err
 }
 
 // applyTxAtSession is ApplyTxAt with an optional BatchSession.
@@ -79,13 +80,22 @@ func ApplyTxAt(st state.StateDB, tx core.Transaction, verifySig func(core.Transa
 // into that session instead, and nothing about it settles until the caller
 // runs session.Finish once, after every transaction in the block has been
 // through this function.
-func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32, session *exchange.BatchSession) error {
+//
+// baseFee (M9) is this block's fee-market base fee, consulted ONLY by the
+// contract/EVM branches below (applyContractTx/applyEVMTx) -- the two
+// transaction shapes that already had a gas concept before M9. Plain
+// transfers, exchange orders, and PoS attestations remain exactly as
+// fee-exempt as they always were; baseFee is simply unused on those paths.
+// Returns (gasUsed, tip, err): gasUsed/tip are always 0 on the fee-exempt
+// paths and on any error; tip is the priority-fee portion Chain.AddBlock/
+// CandidateStateRoot credit to the block's Coinbase, on top of BlockReward.
+func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core.Transaction) bool, height uint64, index uint32, session *exchange.BatchSession, baseFee uint64) (uint64, uint64, error) {
 	if verifySig == nil || !verifySig(tx) {
-		return ErrBadSig
+		return 0, 0, ErrBadSig
 	}
 	from := st.GetAccount(tx.From)
 	if tx.Nonce != from.Nonce {
-		return ErrBadNonce
+		return 0, 0, ErrBadNonce
 	}
 
 	// The exchange is a reserved address the state transition routes to instead
@@ -94,7 +104,7 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 	// to the StackVM, which has no idea what an order is.
 	if exchange.IsExchangeTx(tx) {
 		if from.Balance < tx.Value {
-			return ErrInsufficientBalance
+			return 0, 0, ErrInsufficientBalance
 		}
 		// The nonce advances before the order runs, exactly as it does for a
 		// contract call: a rejected order must still consume its nonce, or the
@@ -102,9 +112,9 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 		from.Nonce++
 		st.SetAccount(tx.From, from)
 		if session != nil {
-			return session.Apply(height, index, tx.From, tx.Data)
+			return 0, 0, session.Apply(height, index, tx.From, tx.Data)
 		}
-		return exchange.Apply(st, tx, height, index)
+		return 0, 0, exchange.Apply(st, tx, height, index)
 	}
 
 	// Real embedded EVM contracts (evm/adapter) are routed here, before
@@ -113,7 +123,16 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 	// definition too, and would otherwise be misrouted to the StackVM. See
 	// isEVMTx's own doc comment (chain/evm_wiring.go).
 	if isEVMTx(st, tx) {
-		return applyEVMTx(st, tx, from, height)
+		gasUsed, err := applyEVMTx(st, tx, from, height, baseFee)
+		if err != nil {
+			return 0, 0, err
+		}
+		// EffectiveGasPrice's inputs are identical to what applyEVMTx already
+		// validated, so this re-derivation cannot itself fail -- it exists
+		// only to recover the priorityFee split without threading a third
+		// return value through applyEVMTx's own VM-execution plumbing.
+		_, priorityFee, _ := EffectiveGasPrice(baseFee, tx.GasFeeCap, tx.GasTipCap)
+		return gasUsed, gasUsed * priorityFee, nil
 	}
 
 	// PoS checkpoint attestations (M8) are a reserved address the state
@@ -126,26 +145,33 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 	// no value movement, no VM -- because BLS verification and stake
 	// tallying are whole-BLOCK concerns Chain.AddBlock handles one layer up
 	// (see chain.go's verifyAttestations/recordAttestations), not a per-tx
-	// state-transition concern.
+	// state-transition concern. Fee-exempt, same as every other consensus-
+	// infrastructure (not economic) transaction shape -- see this function's
+	// own doc comment.
 	if pos.IsAttestationTx(tx) {
 		from.Nonce++
 		st.SetAccount(tx.From, from)
-		return nil
+		return 0, 0, nil
 	}
 
 	if isContractTx(st, tx) {
-		return applyContractTx(st, tx, from)
+		gasUsed, err := applyContractTx(st, tx, from, baseFee)
+		if err != nil {
+			return 0, 0, err
+		}
+		_, priorityFee, _ := EffectiveGasPrice(baseFee, tx.GasFeeCap, tx.GasTipCap)
+		return gasUsed, gasUsed * priorityFee, nil
 	}
 
 	if from.Balance < tx.Value {
-		return ErrInsufficientBalance
+		return 0, 0, ErrInsufficientBalance
 	}
 
 	// Self-transfer: balance nets to zero, but the nonce still advances.
 	if tx.From == tx.To {
 		from.Nonce++
 		st.SetAccount(tx.From, from)
-		return nil
+		return 0, 0, nil
 	}
 
 	to := st.GetAccount(tx.To)
@@ -154,7 +180,7 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 	to.Balance += tx.Value
 	st.SetAccount(tx.From, from)
 	st.SetAccount(tx.To, to)
-	return nil
+	return 0, 0, nil
 }
 
 // applyTxsAt applies every tx in txs against st in order, at the given block
@@ -170,7 +196,13 @@ func applyTxAtSession(st state.StateDB, tx core.Transaction, verifySig func(core
 // (mode's zero value, so an unconfigured Chain behaves exactly as it always
 // has) there is no session and nothing changes from before this function
 // existed.
-func applyTxsAt(st state.StateDB, txs []core.Transaction, verifySig func(core.Transaction) bool, height uint64, mode exchange.Mode) error {
+//
+// baseFee (M9) is threaded through to every applyTxAtSession call. Returns
+// the total gas used and total priority fee (tip) across every fee-priced
+// (contract/EVM) transaction in txs -- Chain.AddBlock validates the former
+// against Header.GasUsed/GasLimit; both AddBlock and CandidateStateRoot
+// credit the latter to the block's Coinbase, on top of BlockReward.
+func applyTxsAt(st state.StateDB, txs []core.Transaction, verifySig func(core.Transaction) bool, height uint64, mode exchange.Mode, baseFee uint64) (uint64, uint64, error) {
 	var session *exchange.BatchSession
 	if mode == exchange.BatchAuction {
 		var senders []core.Address
@@ -182,24 +214,28 @@ func applyTxsAt(st state.StateDB, txs []core.Transaction, verifySig func(core.Tr
 		if len(senders) > 0 {
 			s, err := exchange.NewBatchSession(st, senders...)
 			if err != nil {
-				return err
+				return 0, 0, err
 			}
 			session = s
 		}
 	}
 
+	var totalGasUsed, totalTip uint64
 	for i := range txs {
-		if err := applyTxAtSession(st, txs[i], verifySig, height, uint32(i), session); err != nil {
-			return err
+		gasUsed, tip, err := applyTxAtSession(st, txs[i], verifySig, height, uint32(i), session, baseFee)
+		if err != nil {
+			return 0, 0, err
 		}
+		totalGasUsed += gasUsed
+		totalTip += tip
 	}
 
 	if session != nil {
 		if _, err := session.Finish(st, height); err != nil {
-			return err
+			return 0, 0, err
 		}
 	}
-	return nil
+	return totalGasUsed, totalTip, nil
 }
 
 // isContractTx reports whether tx must be routed through the VM rather than the
@@ -217,19 +253,35 @@ func isContractTx(st state.StateDB, tx core.Transaction) bool {
 }
 
 // applyContractTx runs a contract creation or call through the StackVM. Gas is
-// reserved up front (GasLimit * GasPrice) and, together with the nonce bump,
-// always persists — even when execution reverts or runs out of gas. Unused gas
-// is refunded. On success the VM has already committed value transfer and
-// storage writes to st; on failure those writes are reverted by the VM, leaving
-// only the gas charge and nonce increment. The tx is only rejected outright
-// (nonce NOT advanced) when the sender cannot afford the up-front gas.
-func applyContractTx(st state.StateDB, tx core.Transaction, from state.Account) error {
-	gasReserve := tx.GasLimit * GasPrice
-	if GasPrice != 0 && tx.GasLimit != 0 && gasReserve/GasPrice != tx.GasLimit {
-		return ErrCantAffordGas // multiplication overflow: unaffordable by definition
+// reserved up front at the sender's own GasFeeCap (M9's worst-case ceiling,
+// replacing the old flat GasPrice constant) and, together with the nonce
+// bump, always persists — even when execution reverts or runs out of gas.
+// Only the effective price (baseFee + capped priority fee, never more than
+// GasFeeCap -- see EffectiveGasPrice) is actually charged for gas consumed;
+// the rest is refunded, exactly like the pre-M9 refund but at the real
+// per-transaction price instead of a flat constant. The base-fee portion of
+// what's charged is credited to nobody (burned, same mechanism M9 formalizes
+// everywhere); the priority-fee portion is returned to the caller
+// (applyTxAtSession) as tip, credited to Coinbase one layer up. On success the
+// VM has already committed value transfer and storage writes to st; on
+// failure those writes are reverted by the VM, leaving only the gas charge
+// and nonce increment. The tx is only rejected outright (nonce NOT advanced)
+// when the sender cannot afford the up-front gas, or when its fee fields are
+// invalid (GasTipCap > GasFeeCap) or cannot cover this block's BaseFee.
+func applyContractTx(st state.StateDB, tx core.Transaction, from state.Account, baseFee uint64) (uint64, error) {
+	if err := ValidateFeeCapTip(tx.GasFeeCap, tx.GasTipCap); err != nil {
+		return 0, err
+	}
+	gasReserve := tx.GasLimit * tx.GasFeeCap
+	if tx.GasFeeCap != 0 && tx.GasLimit != 0 && gasReserve/tx.GasFeeCap != tx.GasLimit {
+		return 0, ErrCantAffordGas // multiplication overflow: unaffordable by definition
 	}
 	if from.Balance < gasReserve {
-		return ErrCantAffordGas
+		return 0, ErrCantAffordGas
+	}
+	effectivePrice, _, err := EffectiveGasPrice(baseFee, tx.GasFeeCap, tx.GasTipCap)
+	if err != nil {
+		return 0, err // ErrFeeCapBelowBaseFee
 	}
 
 	// Reserve gas and advance nonce up front; both persist regardless of the
@@ -253,12 +305,17 @@ func applyContractTx(st state.StateDB, tx core.Transaction, from state.Account) 
 		Data:     tx.Data,
 	})
 
-	// Refund unused gas (GasUsed == GasLimit on out-of-gas, so refund is 0).
-	refund := (tx.GasLimit - receipt.GasUsed) * GasPrice
+	// Refund whatever wasn't actually owed at the effective price (unused gas,
+	// GasUsed == GasLimit on out-of-gas so that portion refunds 0; plus any
+	// headroom between GasFeeCap and the real effective price). Never
+	// underflows: effectivePrice <= GasFeeCap always (EffectiveGasPrice caps
+	// priority fee at the feeCap-baseFee headroom), and receipt.GasUsed <=
+	// tx.GasLimit always, so receipt.GasUsed*effectivePrice <= gasReserve.
+	refund := gasReserve - receipt.GasUsed*effectivePrice
 	acct := st.GetAccount(tx.From)
 	acct.Balance += refund
 	st.SetAccount(tx.From, acct)
-	return nil
+	return receipt.GasUsed, nil
 }
 
 // ApplyBlock applies every transaction in b in order, then credits BlockReward
@@ -280,11 +337,17 @@ func ApplyBlock(st state.StateDB, b core.Block, miner core.Address, verifySig fu
 // without needing two different chains to do it.
 func ApplyBlockWithMode(st state.StateDB, b core.Block, miner core.Address, verifySig func(core.Transaction) bool, mode exchange.Mode) error {
 	ov := newOverlay(st)
-	if err := applyTxsAt(ov, b.Txs, verifySig, b.Header.Height, mode); err != nil {
+	// b.Header.BaseFee is whatever the caller set on the block passed in
+	// (zero-value 0 if unset, same as every other Header field this
+	// standalone entrypoint doesn't independently validate -- see this
+	// function's own doc comment: it's a simulation helper, not the real
+	// consensus path, which is Chain.AddBlock).
+	_, tip, err := applyTxsAt(ov, b.Txs, verifySig, b.Header.Height, mode, b.Header.BaseFee)
+	if err != nil {
 		return err
 	}
 	m := ov.GetAccount(miner)
-	m.Balance += BlockReward
+	m.Balance += BlockReward + tip
 	ov.SetAccount(miner, m)
 
 	ov.flush()
