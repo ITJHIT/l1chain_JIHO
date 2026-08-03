@@ -8,13 +8,19 @@ import (
 	"l1chain/vm"
 )
 
-// feeTx builds a StackVM contract call/deploy transaction with a generous
-// GasFeeCap (100_000, far above anything BaseFee reaches in this file's own
-// tests) and no tip -- these tests care about BaseFee agreement/rejection,
-// not tip accounting (see chain/contract_test.go's deployTx/callTx for the
-// GasFeeCap:1 convention used elsewhere to preserve exact pre-M9 costs).
+// feeTx builds a StackVM contract call/deploy transaction with a GasFeeCap
+// (150) comfortably above anything BaseFee reaches in this file's own tests
+// (genesis InitialBaseFee 100, drifting by at most 1/8 per block) and no tip
+// -- these tests care about BaseFee agreement/rejection, not tip accounting
+// (see chain/contract_test.go's deployTx/callTx for the GasFeeCap:1
+// convention used elsewhere to preserve exact pre-M9 costs). gasLimit is the
+// PER-TRANSACTION ceiling (unrelated to Chain.gasLimit, the block-level cap
+// set via SetGasLimit) -- callers pass just enough headroom over the real
+// StackVM cost (32_000 for a deploy, 5212 per counterCode call) that the
+// reservation (gasLimit * 150) stays affordable against a 10_000_000 alloc
+// even with a dozen transactions across several blocks.
 func feeTx(from, to core.Address, nonce, gasLimit uint64, data []byte) core.Transaction {
-	return core.Transaction{From: from, To: to, Nonce: nonce, GasLimit: gasLimit, ChainID: DefaultChainID, GasFeeCap: 100_000, GasTipCap: 0, Data: data, Signature: []byte{1}}
+	return core.Transaction{From: from, To: to, Nonce: nonce, GasLimit: gasLimit, ChainID: DefaultChainID, GasFeeCap: 150, GasTipCap: 0, Data: data, Signature: []byte{1}}
 }
 
 // TestBaseFeeAgreesAcrossIndependentChains is PR5's own required determinism
@@ -49,14 +55,14 @@ func TestBaseFeeAgreesAcrossIndependentChains(t *testing.T) {
 	// Block 4: empty (0 gas) -> block 5's BaseFee falls.
 	// Block 5: empty, purely so its own BaseFee (reflecting block 4) can be read.
 	blocks := [][]core.Transaction{
-		{feeTx(sender, core.Address{}, 0, 100_000, counterCode)},
-		{feeTx(sender, contract, 1, 100_000, nil)},
+		{feeTx(sender, core.Address{}, 0, 40_000, counterCode)},
+		{feeTx(sender, contract, 1, 10_000, nil)},
 		{
-			feeTx(sender, contract, 2, 100_000, nil), feeTx(sender, contract, 3, 100_000, nil),
-			feeTx(sender, contract, 4, 100_000, nil), feeTx(sender, contract, 5, 100_000, nil),
-			feeTx(sender, contract, 6, 100_000, nil), feeTx(sender, contract, 7, 100_000, nil),
-			feeTx(sender, contract, 8, 100_000, nil), feeTx(sender, contract, 9, 100_000, nil),
-			feeTx(sender, contract, 10, 100_000, nil), feeTx(sender, contract, 11, 100_000, nil),
+			feeTx(sender, contract, 2, 10_000, nil), feeTx(sender, contract, 3, 10_000, nil),
+			feeTx(sender, contract, 4, 10_000, nil), feeTx(sender, contract, 5, 10_000, nil),
+			feeTx(sender, contract, 6, 10_000, nil), feeTx(sender, contract, 7, 10_000, nil),
+			feeTx(sender, contract, 8, 10_000, nil), feeTx(sender, contract, 9, 10_000, nil),
+			feeTx(sender, contract, 10, 10_000, nil), feeTx(sender, contract, 11, 10_000, nil),
 		},
 		{},
 		{},
