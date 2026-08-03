@@ -82,8 +82,9 @@ func (e *RPCError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Cod
 
 // TxJSON is the wire representation of a core.Transaction. Addresses, hashes,
 // Data and Signature are hex strings; the large integer fields (Value, Nonce,
-// GasLimit, ChainID) are encoded as DECIMAL STRINGS via the encoding/json
-// ",string" option so a JS client never loses precision above 2^53.
+// GasLimit, ChainID, GasFeeCap, GasTipCap) are encoded as DECIMAL STRINGS via
+// the encoding/json ",string" option so a JS client never loses precision
+// above 2^53.
 type TxJSON struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
@@ -91,15 +92,17 @@ type TxJSON struct {
 	Nonce     uint64 `json:"nonce,string"`
 	GasLimit  uint64 `json:"gasLimit,string"`
 	ChainID   uint64 `json:"chainId,string"`
+	GasFeeCap uint64 `json:"gasFeeCap,string"`
+	GasTipCap uint64 `json:"gasTipCap,string"`
 	Data      string `json:"data"`
 	Signature string `json:"signature"`
 	Hash      string `json:"hash"`
 }
 
 // HeaderJSON is the wire representation of a core.Header. Hashes/addresses are
-// hex; the u64 fields that can grow large (Height, Nonce) are decimal strings.
-// ProposerSig is a hex string like Data/Signature on TxJSON -- empty for every
-// PoW block (M8), populated for a PoS block.
+// hex; the u64 fields that can grow large (Height, Nonce, BaseFee, GasUsed)
+// are decimal strings. ProposerSig is a hex string like Data/Signature on
+// TxJSON -- empty for every PoW block (M8), populated for a PoS block.
 type HeaderJSON struct {
 	Height      uint64 `json:"height,string"`
 	PrevHash    string `json:"prevHash"`
@@ -109,6 +112,8 @@ type HeaderJSON struct {
 	Timestamp   int64  `json:"timestamp"`
 	Difficulty  uint32 `json:"difficulty"`
 	Nonce       uint64 `json:"nonce,string"`
+	BaseFee     uint64 `json:"baseFee,string"`
+	GasUsed     uint64 `json:"gasUsed,string"`
 	ProposerSig string `json:"proposerSig"`
 }
 
@@ -244,6 +249,8 @@ func TxToJSON(tx core.Transaction) TxJSON {
 		Nonce:     tx.Nonce,
 		GasLimit:  tx.GasLimit,
 		ChainID:   tx.ChainID,
+		GasFeeCap: tx.GasFeeCap,
+		GasTipCap: tx.GasTipCap,
 		Data:      hex.EncodeToString(tx.Data),
 		Signature: hex.EncodeToString(tx.Signature),
 		Hash:      h.Hex(),
@@ -276,6 +283,8 @@ func TxFromJSON(j TxJSON) (core.Transaction, error) {
 		Nonce:     j.Nonce,
 		GasLimit:  j.GasLimit,
 		ChainID:   j.ChainID,
+		GasFeeCap: j.GasFeeCap,
+		GasTipCap: j.GasTipCap,
 		Data:      data,
 		Signature: sig,
 	}, nil
@@ -297,6 +306,8 @@ func BlockToJSON(b core.Block) BlockJSON {
 			Timestamp:   b.Header.Timestamp,
 			Difficulty:  b.Header.Difficulty,
 			Nonce:       b.Header.Nonce,
+			BaseFee:     b.Header.BaseFee,
+			GasUsed:     b.Header.GasUsed,
 			ProposerSig: hex.EncodeToString(b.Header.ProposerSig),
 		},
 		Hash: b.Hash().Hex(),
@@ -337,6 +348,8 @@ func HeaderFromJSON(j HeaderJSON) (core.Header, error) {
 		Timestamp:   j.Timestamp,
 		Difficulty:  j.Difficulty,
 		Nonce:       j.Nonce,
+		BaseFee:     j.BaseFee,
+		GasUsed:     j.GasUsed,
 		ProposerSig: proposerSig,
 	}, nil
 }

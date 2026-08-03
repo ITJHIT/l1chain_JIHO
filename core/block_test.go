@@ -127,13 +127,28 @@ func TestHeaderSigningHashExcludesProposerSig(t *testing.T) {
 	}
 }
 
-// TestEmptyProposerSigLeavesHashFormulaUnchanged proves the M8 field
-// addition is a genuine no-op for every PoW block (empty ProposerSig,
-// forever -- see ProposerSig's own doc comment): Hash() must equal
-// SumHash of the exact same 8-field encoding preimage() always produced
-// before ProposerSig existed, independently re-derived here rather than
-// merely asserted by inspection.
-func TestEmptyProposerSigLeavesHashFormulaUnchanged(t *testing.T) {
+// TestEmptyProposerSigLeavesHashSigningHashEqual proves ProposerSig stays a
+// genuine hash-formula no-op when empty (every PoW block, forever -- see
+// ProposerSig's own doc comment): Hash() must equal SigningHash() whenever
+// ProposerSig is unset, regardless of what else is in the header. This is
+// the narrower property TestEmptyProposerSigLeavesHashFormulaUnchanged used
+// to prove alongside a full hand-rederivation; that combined claim stopped
+// being accurate once M9 added BaseFee/GasUsed as two more unconditionally-
+// hashed fields (see TestHeaderHashIncludesBaseFeeAndGasUsed below for the
+// current full rederivation).
+func TestEmptyProposerSigLeavesHashSigningHashEqual(t *testing.T) {
+	h := Header{Height: 7, Coinbase: Address{9}, Difficulty: 6, Nonce: 42, BaseFee: 100, GasUsed: 5000}
+	if got, want := h.Hash(), h.SigningHash(); got != want {
+		t.Fatalf("Hash() = %x, want %x (== SigningHash() when ProposerSig is empty)", got, want)
+	}
+}
+
+// TestHeaderHashIncludesBaseFeeAndGasUsed independently re-derives the
+// current (M9) 10-field header encoding by hand -- mirrors
+// TestTxSigningHashIncludesGasFeeCapAndGasTipCap's own rederivation style for
+// Transaction -- rather than merely asserting by inspection that BaseFee/
+// GasUsed were added somewhere in the preimage.
+func TestHeaderHashIncludesBaseFeeAndGasUsed(t *testing.T) {
 	h := Header{
 		Height:     7,
 		PrevHash:   SumHash([]byte("prev")),
@@ -143,6 +158,8 @@ func TestEmptyProposerSigLeavesHashFormulaUnchanged(t *testing.T) {
 		Timestamp:  1234,
 		Difficulty: 6,
 		Nonce:      42,
+		BaseFee:    100,
+		GasUsed:    5000,
 	}
 	var buf []byte
 	var n8 [8]byte
@@ -159,12 +176,30 @@ func TestEmptyProposerSigLeavesHashFormulaUnchanged(t *testing.T) {
 	buf = append(buf, n4[:]...)
 	binary.BigEndian.PutUint64(n8[:], h.Nonce)
 	buf = append(buf, n8[:]...)
+	binary.BigEndian.PutUint64(n8[:], h.BaseFee)
+	buf = append(buf, n8[:]...)
+	binary.BigEndian.PutUint64(n8[:], h.GasUsed)
+	buf = append(buf, n8[:]...)
 
 	want := SumHash(buf)
 	if got := h.Hash(); got != want {
-		t.Fatalf("Hash() with empty ProposerSig = %x, want %x (the pre-M8 8-field formula, independently re-derived)", got, want)
+		t.Fatalf("Hash() = %x, want %x (independently re-derived 10-field encoding)", got, want)
 	}
 	if got := h.SigningHash(); got != want {
-		t.Fatalf("SigningHash() with empty ProposerSig = %x, want %x", got, want)
+		t.Fatalf("SigningHash() = %x, want %x", got, want)
+	}
+
+	// A tampered BaseFee or GasUsed must change the hash -- both are signed
+	// over by a PoS proposer and independently re-verified by every
+	// validator (chain.ComputeBaseFee), never freely chosen.
+	feeChanged := h
+	feeChanged.BaseFee = 101
+	if feeChanged.Hash() == want {
+		t.Fatal("Hash() must change when BaseFee changes")
+	}
+	usedChanged := h
+	usedChanged.GasUsed = 5001
+	if usedChanged.Hash() == want {
+		t.Fatal("Hash() must change when GasUsed changes")
 	}
 }

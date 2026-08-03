@@ -14,6 +14,19 @@ type Header struct {
 	Difficulty uint32 // required number of leading zero bits in the block hash; always 0 for a PoS block
 	Nonce      uint64 // PoW solution; always 0 for a PoS block
 
+	// BaseFee is this block's protocol-computed fee-market base fee (M9, see
+	// chain.ComputeBaseFee) -- deterministically derived from the parent
+	// header's own BaseFee/GasUsed, verified independently by every
+	// validator, never chosen freely by the miner/proposer. GasUsed is the
+	// total gas actually consumed by this block's fee-priced (contract/EVM)
+	// transactions; plain-transfer/exchange/attestation transactions are not
+	// fee-priced and do not contribute to it (see chain/transition.go's own
+	// scope-boundary doc comment). Both apply identically under PoW and PoS
+	// -- the fee market is a state-transition concern, not a consensus-mode
+	// concern.
+	BaseFee uint64
+	GasUsed uint64
+
 	// ProposerSig is a PoS validator's BLS signature (see pos.Key.Sign) by
 	// Coinbase over SigningHash() -- empty for every PoW block, forever (M8
 	// adds PoS as a genesis-selected mode ADDITIVE to PoW, never replacing
@@ -47,7 +60,7 @@ func (b *Block) TxRoot() Hash {
 // proposer signs SigningHash() = preimage(false), so the signature itself is
 // never part of what it signs over.
 func (h *Header) preimage(withSig bool) []byte {
-	buf := make([]byte, 0, 8+HashLen*3+AddrLen+8+4+8+len(h.ProposerSig))
+	buf := make([]byte, 0, 8+HashLen*3+AddrLen+8+4+8+8+8+len(h.ProposerSig))
 	var n8 [8]byte
 	binary.BigEndian.PutUint64(n8[:], h.Height)
 	buf = append(buf, n8[:]...)
@@ -61,6 +74,10 @@ func (h *Header) preimage(withSig bool) []byte {
 	binary.BigEndian.PutUint32(n4[:], h.Difficulty)
 	buf = append(buf, n4[:]...)
 	binary.BigEndian.PutUint64(n8[:], h.Nonce)
+	buf = append(buf, n8[:]...)
+	binary.BigEndian.PutUint64(n8[:], h.BaseFee)
+	buf = append(buf, n8[:]...)
+	binary.BigEndian.PutUint64(n8[:], h.GasUsed)
 	buf = append(buf, n8[:]...)
 	if withSig {
 		buf = append(buf, h.ProposerSig...)
