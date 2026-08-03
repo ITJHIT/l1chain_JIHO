@@ -17,7 +17,9 @@
 //	        --mine-interval <dur> --listen-host <host> --listen <port> \
 //	        --peers <multiaddr,...> --identity-key <hex> --mdns \
 //	        --relay-service --relay <multiaddr> \
-//	        --dht --dht-bootstrap <multiaddr,...>
+//	        --dht --dht-bootstrap <multiaddr,...> \
+//	        --consensus <pow|pos> --validators <addrHex:blsPubKeyHex:stake,...> \
+//	        --validator-bls-key <hex> --slot-interval <dur>
 //	    Run a node with an HTTP JSON-RPC server, mining on an interval.
 //	    --listen-host defaults to 127.0.0.1; set it to 0.0.0.0 to be
 //	    reachable from sibling Docker containers (see docker-compose.yml).
@@ -34,6 +36,20 @@
 //	    --dht enables Kademlia DHT peer discovery (advertise + find +
 //	    auto-dial under a shared rendezvous) -- the non-LAN counterpart
 //	    to --mdns; --dht-bootstrap seeds its routing table.
+//	    --consensus selects pow (default, unchanged) or pos (M8) for the
+//	    chain's entire lifetime -- see chain.Chain.SetConsensusMode's own
+//	    doc comment for why this can never change after genesis.
+//	    --validators is the genesis-fixed PoS validator set, required when
+//	    --consensus=pos: each entry is this node's own secp256k1 address
+//	    (the same identity --miner-key already provides -- reused as
+//	    Coinbase/proposer identity, see core.Header.Coinbase's own doc
+//	    comment), that validator's BLS public key (hex), and its stake.
+//	    --validator-bls-key is THIS node's own BLS consensus-signing key
+//	    (hex; empty = generate, meaning this node only follows/validates
+//	    PoS blocks, never proposes or attests -- mirrors --miner-key's own
+//	    "empty = generate" convention). --slot-interval is the PoS analog
+//	    of --mine-interval: how often this node attempts ProposeBlock +
+//	    MaybeAttest.
 package main
 
 import (
@@ -56,6 +72,7 @@ import (
 	"l1chain/core"
 	"l1chain/node"
 	"l1chain/p2p"
+	"l1chain/pos"
 	"l1chain/rpc"
 	"l1chain/wallet"
 
@@ -99,7 +116,7 @@ Usage:
   l1 wallet new
   l1 balance --addr <hex> --rpc <url> [--verify]
   l1 send --key <hex> --to <hex> --value <n> --rpc <url>
-  l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> --difficulty <n> --alloc <addrHex:amt,...> --base-alloc <addrHex:amt,...> --mine-interval <dur>`)
+  l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> --difficulty <n> --alloc <addrHex:amt,...> --base-alloc <addrHex:amt,...> --mine-interval <dur> [--consensus pow|pos --validators <addrHex:blsPubKeyHex:stake,...> --validator-bls-key <hex> --slot-interval <dur>]`)
 }
 
 func cmdWallet(args []string) error {
@@ -267,6 +284,10 @@ func cmdNode(args []string) error {
 	relaySpec := fs.String("relay", "", "full multiaddr of a relay (running --relay-service) to reserve a slot on, so peers can reach this node at /p2p/<relay>/p2p-circuit/p2p/<this node> without a direct address of its own")
 	dhtEnabled := fs.Bool("dht", false, "enable Kademlia DHT peer discovery: advertise and find other l1chain nodes under a shared rendezvous, dialing any found -- the non-LAN counterpart to --mdns")
 	dhtBootstrapSpec := fs.String("dht-bootstrap", "", "comma-separated multiaddrs to seed the DHT routing table; at least one live peer is required for --dht to discover anything beyond an empty table")
+	consensusSpec := fs.String("consensus", "pow", "consensus mode: pow (default, unchanged since M1) or pos (M8) -- fixed for the chain's entire lifetime, see chain.Chain.SetConsensusMode's own doc comment")
+	validatorsSpec := fs.String("validators", "", "PoS genesis validator set: addrHex:blsPubKeyHex:stake,addrHex:blsPubKeyHex:stake,... (required when --consensus=pos)")
+	validatorBLSKeyHex := fs.String("validator-bls-key", "", "this node's own BLS validator signing key (hex; empty = generate, meaning this node only follows/validates PoS blocks, never proposes or attests)")
+	slotInterval := fs.Duration("slot-interval", 5*time.Second, "PoS block-proposal/attestation attempt interval (the PoS analog of --mine-interval)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -296,6 +317,43 @@ func cmdNode(args []string) error {
 		return fmt.Errorf("bad --base-alloc: %w", err)
 	}
 
+	var consensusMode consensus.Mode
+	switch strings.ToLower(strings.TrimSpace(*consensusSpec)) {
+	case "", "pow":
+		consensusMode = consensus.PoW
+	case "pos":
+		consensusMode = consensus.PoS
+	default:
+		return fmt.Errorf("bad --consensus %q (want pow or pos)", *consensusSpec)
+	}
+
+	validators, err := parseValidators(*validatorsSpec)
+	if err != nil {
+		return fmt.Errorf("bad --validators: %w", err)
+	}
+
+	var validatorKey pos.Key
+	if consensusMode == consensus.PoS {
+		if *validatorBLSKeyHex != "" {
+			b, err := hex.DecodeString(strings.TrimPrefix(*validatorBLSKeyHex, "0x"))
+			if err != nil {
+				return fmt.Errorf("bad --validator-bls-key: %w", err)
+			}
+			k, err := pos.KeyFromBytes(b)
+			if err != nil {
+				return fmt.Errorf("bad --validator-bls-key: %w", err)
+			}
+			validatorKey = k
+		} else {
+			k, err := pos.NewKey()
+			if err != nil {
+				return err
+			}
+			validatorKey = k
+			fmt.Printf("generated validator BLS key: %s (pubkey %s)\n", hex.EncodeToString(k.Bytes()), hex.EncodeToString(k.PubKey()))
+		}
+	}
+
 	n, err := node.New(node.Config{
 		DBPath:           *db,
 		MinerKey:         minerKey,
@@ -303,6 +361,9 @@ func cmdNode(args []string) error {
 		GenesisAlloc:     alloc,
 		GenesisBaseAlloc: baseAlloc,
 		GenesisTimestamp: *genesisTS,
+		ConsensusMode:    consensusMode,
+		Validators:       validators,
+		ValidatorBLSKey:  validatorKey,
 	})
 	if err != nil {
 		return err
@@ -425,7 +486,11 @@ func cmdNode(args []string) error {
 	fmt.Printf("node listening on http://%s (head height %d, difficulty %d)\n",
 		ln.Addr(), n.Head().Header.Height, *difficulty)
 
-	ticker := time.NewTicker(*mineInterval)
+	tickInterval := *mineInterval
+	if consensusMode == consensus.PoS {
+		tickInterval = *slotInterval
+	}
+	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -435,6 +500,29 @@ func cmdNode(args []string) error {
 			defer cancel()
 			return srv.Shutdown(shutCtx)
 		case <-ticker.C:
+			if consensusMode == consensus.PoS {
+				// ErrNotMyTurn is expected on nearly every tick for nearly
+				// every validator -- see Node.ProposeBlock's own doc
+				// comment -- so it is not logged as a failure, unlike every
+				// other error.
+				blk, err := n.ProposeBlock()
+				switch {
+				case err == nil:
+					if aerr := pp.AnnounceBlock(blk); aerr != nil {
+						fmt.Fprintln(os.Stderr, "announce:", aerr)
+					}
+					fmt.Printf("proposed block %d (%s, %d txs)\n",
+						blk.Header.Height, blk.Hash().Hex()[:12], len(blk.Txs))
+				case errors.Is(err, node.ErrNotMyTurn):
+					// silent: not this node's slot
+				default:
+					fmt.Fprintln(os.Stderr, "propose:", err)
+				}
+				if aerr := n.MaybeAttest(); aerr != nil {
+					fmt.Fprintln(os.Stderr, "attest:", aerr)
+				}
+				continue
+			}
 			blk, err := n.MineBlock()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "mine:", err)
@@ -489,4 +577,39 @@ func parseAlloc(spec string) (map[core.Address]uint64, error) {
 		alloc[addr] = amt
 	}
 	return alloc, nil
+}
+
+// parseValidators parses "addrHex:blsPubKeyHex:stake,addrHex:blsPubKeyHex:stake,..."
+// into a genesis PoS validator set, mirroring parseAlloc's exact shape
+// extended with a BLS public key field (see pos.ValidatorInfo).
+func parseValidators(spec string) ([]pos.ValidatorInfo, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	var out []pos.ValidatorInfo
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		fields := strings.SplitN(part, ":", 3)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("bad validator entry %q (want addrHex:blsPubKeyHex:stake)", part)
+		}
+		addr, err := parseAddress(strings.TrimSpace(fields[0]))
+		if err != nil {
+			return nil, err
+		}
+		pubKey, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(fields[1]), "0x"))
+		if err != nil {
+			return nil, fmt.Errorf("bad BLS pubkey in %q: %w", part, err)
+		}
+		stake, err := strconv.ParseUint(strings.TrimSpace(fields[2]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("bad stake in %q: %w", part, err)
+		}
+		out = append(out, pos.ValidatorInfo{Address: addr, BLSPubKey: pubKey, Stake: stake})
+	}
+	return out, nil
 }
