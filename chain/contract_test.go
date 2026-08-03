@@ -28,12 +28,18 @@ func newContractChain() (*Chain, core.Block, map[core.Address]uint64) {
 	return NewChain(gb, alloc), gb, alloc
 }
 
+// GasFeeCap/GasTipCap are both 1 (M9): with these chains' BaseFee staying 0
+// (InitialBaseFee never set), effectivePrice = 0 + min(1, 1-0) = 1, exactly
+// matching the pre-M9 flat GasPrice=1 cost from the sender's own perspective
+// -- the only difference is that price now reaches the block's coinbase as
+// tip instead of being burned, which none of this file's assertions (sender
+// balance, contract storage) depend on either way.
 func deployTx(nonce uint64) core.Transaction {
-	return core.Transaction{From: addr(1), To: core.Address{}, Nonce: nonce, GasLimit: 100000, ChainID: DefaultChainID, Data: counterCode, Signature: []byte{1}}
+	return core.Transaction{From: addr(1), To: core.Address{}, Nonce: nonce, GasLimit: 100000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: counterCode, Signature: []byte{1}}
 }
 
 func callTx(to core.Address, nonce, gas uint64) core.Transaction {
-	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, ChainID: DefaultChainID, Signature: []byte{1}}
+	return core.Transaction{From: addr(1), To: to, Nonce: nonce, GasLimit: gas, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}}
 }
 
 // TestContractDeployCallAndOOG exercises the full VM-through-chain path: deploy a

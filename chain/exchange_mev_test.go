@@ -152,11 +152,12 @@ func TestChainExchangeModeAffectsRealBlocks(t *testing.T) {
 		orderTxFor(addr(2), 0, orderbook.Buy, 100, 5),
 		orderTxFor(addr(3), 0, orderbook.Buy, 100, 5),
 	}
-	root, err := c.CandidateStateRoot(txs, addr(9), acceptAll)
+	root, gasUsed, err := c.CandidateStateRoot(txs, addr(9), acceptAll)
 	if err != nil {
 		t.Fatalf("CandidateStateRoot: %v", err)
 	}
-	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: addr(9), Difficulty: testDiff}
+	baseFee := ComputeBaseFee(gb.Header.BaseFee, gb.Header.GasUsed, GasTarget(c.GasLimit()))
+	h := core.Header{Height: 1, PrevHash: gb.Hash(), Coinbase: addr(9), Difficulty: testDiff, BaseFee: baseFee, GasUsed: gasUsed}
 	b := core.Block{Header: h, Txs: txs}
 	b.Header.MerkleRoot = b.TxRoot()
 	b.Header.StateRoot = root

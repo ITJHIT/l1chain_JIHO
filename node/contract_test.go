@@ -20,8 +20,12 @@ func slotHash(u uint64) core.Hash {
 	return h
 }
 
+// GasFeeCap/GasTipCap both 1 (M9): with this node's chain BaseFee staying 0
+// (no InitialBaseFee configured), effectivePrice = 0 + min(1, 1-0) = 1,
+// exactly matching the pre-M9 flat GasPrice=1 cost TestNodeMinesContract
+// BlocksAndReplays's own exact balance assertion depends on.
 func signedContractTx(k wallet.Key, to core.Address, isCreate bool, nonce, gas uint64, data []byte) core.Transaction {
-	tx := core.Transaction{Nonce: nonce, GasLimit: gas, ChainID: chain.DefaultChainID, Data: data}
+	tx := core.Transaction{Nonce: nonce, GasLimit: gas, ChainID: chain.DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: data}
 	if !isCreate {
 		tx.To = to
 	}

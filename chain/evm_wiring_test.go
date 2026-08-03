@@ -65,20 +65,25 @@ func TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock(t *testing.T) 
 	outerAddr := evmCreateAddr(sender, nonceOuter)
 	selfdestructedAddr := evmCreateAddr(sender, nonceSelfdestruct)
 
+	// GasFeeCap/GasTipCap both 1 on every tx (M9): with this chain's BaseFee
+	// staying 0 (InitialBaseFee never set), effectivePrice = 0 + min(1,1-0)
+	// = 1, matching the pre-M9 flat GasPrice=1 cost. No assertion below
+	// depends on an exact amount, but every fee-priced tx in this repo's
+	// test suite carries real, nonzero fee fields for consistency.
 	blocks := [][]core.Transaction{
 		// Real OZ-ERC20 deployment through evm.DeployAddress.
 		{
-			{From: sender, To: evm.DeployAddress, Nonce: nonceERC20, GasLimit: 3_000_000, ChainID: DefaultChainID, Data: erc20Code, Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceERC20, GasLimit: 3_000_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: erc20Code, Signature: []byte{1}},
 		},
 		// A nested CALL whose callee genuinely reverts (real Snapshot/
 		// RevertToSnapshot exercise): "inner" always reverts, "outer"
 		// calls inner, swallows the revert, and writes its own storage.
 		{
-			{From: sender, To: evm.DeployAddress, Nonce: nonceInner, GasLimit: 1_000_000, ChainID: DefaultChainID, Data: evmInitCode(evmRevertRuntime), Signature: []byte{1}},
-			{From: sender, To: evm.DeployAddress, Nonce: nonceOuter, GasLimit: 1_000_000, ChainID: DefaultChainID, Data: evmInitCode(evmCallThenStoreRuntime(innerAddr)), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceInner, GasLimit: 1_000_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmRevertRuntime), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceOuter, GasLimit: 1_000_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmInitCode(evmCallThenStoreRuntime(innerAddr)), Signature: []byte{1}},
 		},
 		{
-			{From: sender, To: outerAddr, Nonce: nonceCallOuter, GasLimit: 1_000_000, ChainID: DefaultChainID, Signature: []byte{1}},
+			{From: sender, To: outerAddr, Nonce: nonceCallOuter, GasLimit: 1_000_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Signature: []byte{1}},
 		},
 		// A constructor that self-destructs DURING its own creation
 		// transaction -- EIP-6780's "new contract" branch. Passed
@@ -86,7 +91,7 @@ func TestEVMAdapterCandidateStateRootAgreesWithFreshChainAddBlock(t *testing.T) 
 		// CODECOPY+RETURN pattern (see mpt_determinism_test.go's own
 		// identical note).
 		{
-			{From: sender, To: evm.DeployAddress, Nonce: nonceSelfdestruct, GasLimit: 1_000_000, ChainID: DefaultChainID, Data: evmSelfdestructRuntime(beneficiary), Signature: []byte{1}},
+			{From: sender, To: evm.DeployAddress, Nonce: nonceSelfdestruct, GasLimit: 1_000_000, ChainID: DefaultChainID, GasFeeCap: 1, GasTipCap: 1, Data: evmSelfdestructRuntime(beneficiary), Signature: []byte{1}},
 		},
 	}
 

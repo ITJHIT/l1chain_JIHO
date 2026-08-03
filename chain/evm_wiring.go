@@ -64,14 +64,28 @@ func toGethValue(v uint64) *uint256.Int {
 // (height) is real. Threading genuine header context through would touch
 // Chain.AddBlock/CandidateStateRoot's own call sites, deliberately kept
 // out of this already-large wiring change; a contract that reads those
-// opcodes won't get meaningful values yet.
-func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, height uint64) error {
-	gasReserve := tx.GasLimit * GasPrice
-	if GasPrice != 0 && tx.GasLimit != 0 && gasReserve/GasPrice != tx.GasLimit {
-		return ErrCantAffordGas // multiplication overflow: unaffordable by definition
+// opcodes won't get meaningful values yet. block.basefee IS real as of M9
+// -- see BlockContext.BaseFee below.
+//
+// baseFee (M9) replaces the old flat GasPrice constant: gas is reserved at
+// the sender's own GasFeeCap (worst case), but only the effective price
+// (baseFee + capped priority fee) is actually charged for gas consumed,
+// mirroring applyContractTx's own M9 fee-accounting exactly (see its doc
+// comment for the burn/tip/refund split).
+func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, height uint64, baseFee uint64) (uint64, error) {
+	if err := ValidateFeeCapTip(tx.GasFeeCap, tx.GasTipCap); err != nil {
+		return 0, err
+	}
+	gasReserve := tx.GasLimit * tx.GasFeeCap
+	if tx.GasFeeCap != 0 && tx.GasLimit != 0 && gasReserve/tx.GasFeeCap != tx.GasLimit {
+		return 0, ErrCantAffordGas // multiplication overflow: unaffordable by definition
 	}
 	if from.Balance < gasReserve {
-		return ErrCantAffordGas
+		return 0, ErrCantAffordGas
+	}
+	effectivePrice, _, err := EffectiveGasPrice(baseFee, tx.GasFeeCap, tx.GasTipCap)
+	if err != nil {
+		return 0, err // ErrFeeCapBelowBaseFee
 	}
 
 	// preNonce is the sender's nonce as of immediately before Create/Call
@@ -213,10 +227,10 @@ func applyEVMTx(st state.StateDB, tx core.Transaction, from state.Account, heigh
 	// same reason applyContractTx does: execution may have changed this
 	// same account's balance (e.g. it received value back from a nested
 	// call), and this must not clobber that with a stale copy.
-	refund := (tx.GasLimit - gasUsed) * GasPrice
+	refund := gasReserve - gasUsed*effectivePrice
 	acct := st.GetAccount(tx.From)
 	acct.Nonce = preNonce + 1
 	acct.Balance += refund
 	st.SetAccount(tx.From, acct)
-	return nil
+	return gasUsed, nil
 }

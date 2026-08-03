@@ -465,7 +465,10 @@ func (n *Node) SubmitTx(tx core.Transaction) error {
 // and gas effects) matches on re-validation. This is essential now that the
 // StackVM writes storage: a mutate-then-restore over live head state cannot
 // safely roll back contract storage, whereas a fresh replay never touches it.
-func (n *Node) deriveStateRoot(txs []core.Transaction, coinbase core.Address) (core.Hash, error) {
+// deriveStateRoot also returns the gas used by txs' fee-priced (contract/EVM)
+// transactions (M9) -- MineBlock/ProposeBlock need it to fill Header.GasUsed,
+// the same way they already need the returned root to fill Header.StateRoot.
+func (n *Node) deriveStateRoot(txs []core.Transaction, coinbase core.Address) (core.Hash, uint64, error) {
 	return n.chain.CandidateStateRoot(txs, coinbase, wallet.Verify)
 }
 
@@ -481,7 +484,7 @@ func (n *Node) MineBlock() (core.Block, error) {
 	txs := make([]core.Transaction, len(n.mempool))
 	copy(txs, n.mempool)
 
-	stateRoot, err := n.deriveStateRoot(txs, coinbase)
+	stateRoot, gasUsed, err := n.deriveStateRoot(txs, coinbase)
 	if err != nil {
 		return core.Block{}, err
 	}
@@ -494,6 +497,12 @@ func (n *Node) MineBlock() (core.Block, error) {
 			Timestamp:  time.Now().Unix(),
 			Difficulty: n.Difficulty,
 			StateRoot:  stateRoot,
+			// BaseFee (M9) is independently re-derived by AddBlock from the
+			// same parent header (ErrBadBaseFee if it disagrees) -- computed
+			// via the same NextBaseFee() a block builder would consult to
+			// price/filter transactions before this point.
+			BaseFee: n.chain.NextBaseFee(),
+			GasUsed: gasUsed,
 		},
 		Txs: txs,
 	}
@@ -581,7 +590,7 @@ func (n *Node) ProposeBlock() (core.Block, error) {
 	txs := make([]core.Transaction, len(n.mempool))
 	copy(txs, n.mempool)
 
-	stateRoot, err := n.deriveStateRoot(txs, coinbase)
+	stateRoot, gasUsed, err := n.deriveStateRoot(txs, coinbase)
 	if err != nil {
 		return core.Block{}, err
 	}
@@ -593,6 +602,8 @@ func (n *Node) ProposeBlock() (core.Block, error) {
 			Coinbase:  coinbase,
 			Timestamp: time.Now().Unix(),
 			StateRoot: stateRoot,
+			BaseFee:   n.chain.NextBaseFee(),
+			GasUsed:   gasUsed,
 		},
 		Txs: txs,
 	}
