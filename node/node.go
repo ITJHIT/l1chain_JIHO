@@ -154,6 +154,12 @@ type Node struct {
 	chainID      uint64
 	validatorKey pos.Key // zero value: this node never proposes/attests PoS blocks
 
+	// lastAttestedHeight is the highest PoS checkpoint height this node has
+	// already submitted (or attempted to submit) an attestation for -- see
+	// MaybeAttest. Prevents resubmitting an attestation every tick before
+	// the first one has even been mined into a block.
+	lastAttestedHeight uint64
+
 	alloc     map[core.Address]uint64
 	baseAlloc map[core.Address]uint64
 }
@@ -595,6 +601,64 @@ func (n *Node) ProposeBlock() (core.Block, error) {
 	blk.Header.ProposerSig = n.validatorKey.Sign(signingHash[:], pos.DST(n.chainID))
 
 	return n.commitBlock(blk, txs)
+}
+
+// MaybeAttest checks whether the canonical head has crossed a NEW PoS
+// checkpoint height (Height % pos.CheckpointInterval == 0, and greater than
+// the last height this node has already attested to) and, if so, builds,
+// signs, and submits a checkpoint attestation transaction via the existing
+// SubmitTx path -- an attestation is an ordinary transaction (see
+// pos.EncodeAttest's own doc comment), so it gets replay protection, mempool
+// admission, and P2P gossip entirely for free. No-op (nil, not an error)
+// when this node has no validator key, the chain is not in PoS mode, or
+// there is no new checkpoint yet -- expected on nearly every call, exactly
+// like ProposeBlock's own ErrNotMyTurn, just folded into a nil return since
+// a driving loop calls this every tick regardless of whether this node is
+// even a validator.
+func (n *Node) MaybeAttest() error {
+	n.mu.RLock()
+	mode := n.chain.ConsensusMode()
+	key := n.validatorKey
+	chainID := n.chainID
+	head := n.chain.Head()
+	last := n.lastAttestedHeight
+	var nonce uint64
+	if mode == consensus.PoS {
+		nonce, _ = n.projectSender(n.miner.Address())
+	}
+	n.mu.RUnlock()
+
+	if mode != consensus.PoS || key == (pos.Key{}) {
+		return nil
+	}
+	height := head.Header.Height
+	if height == 0 || height%pos.CheckpointInterval != 0 || height <= last {
+		return nil
+	}
+
+	// The validator's own account identity signs the OUTER transaction with
+	// its existing secp256k1 key (n.miner -- the same identity ProposeBlock
+	// already uses as Coinbase), exactly like every other transaction this
+	// node ever submits; the BLS key signs the INNER attestation payload
+	// (see pos.Key's own doc comment for why PoS uses a second key type).
+	targetHash := head.Hash()
+	blsSig := key.Sign(targetHash[:], pos.DST(chainID))
+	tx := core.Transaction{
+		To:      pos.AttestAddress,
+		Nonce:   nonce,
+		ChainID: chainID,
+		Data:    pos.EncodeAttest(height, targetHash, blsSig),
+	}
+	n.miner.Sign(&tx)
+
+	if err := n.SubmitTx(tx); err != nil {
+		return err
+	}
+
+	n.mu.Lock()
+	n.lastAttestedHeight = height
+	n.mu.Unlock()
+	return nil
 }
 
 // GetBlockByHeight returns the canonical block at height.

@@ -513,3 +513,80 @@ func TestProposeBlockRejectsWithNoValidatorKey(t *testing.T) {
 		t.Fatalf("ProposeBlock (no validator key) = %v, want ErrNoValidatorKey", err)
 	}
 }
+
+// TestMaybeAttestSubmitsAtCheckpointHeightAndDedups drives a single-validator
+// PoS node (always selected, so ProposeBlock alone can build a real chain)
+// to a real checkpoint height, then proves MaybeAttest builds and submits a
+// real attestation transaction exactly once -- a second call before the
+// first is ever mined must not resubmit a duplicate.
+func TestMaybeAttestSubmitsAtCheckpointHeightAndDedups(t *testing.T) {
+	a := newKeyT(t)
+	miner := newKeyT(t)
+	info, blsKey := testValidatorInfo(t, miner.Address(), 100)
+	n, err := New(Config{
+		MinerKey:        miner,
+		GenesisAlloc:    map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode:   consensus.PoS,
+		Validators:      []pos.ValidatorInfo{info},
+		ValidatorBLSKey: blsKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	for h := 0; h < pos.CheckpointInterval; h++ {
+		if _, err := n.ProposeBlock(); err != nil {
+			t.Fatalf("ProposeBlock (building height %d): %v", h+1, err)
+		}
+	}
+	if got := n.Head().Header.Height; got != uint64(pos.CheckpointInterval) {
+		t.Fatalf("head height = %d, want %d", got, pos.CheckpointInterval)
+	}
+
+	if err := n.MaybeAttest(); err != nil {
+		t.Fatalf("MaybeAttest: %v", err)
+	}
+	if got := n.MempoolLen(); got != 1 {
+		t.Fatalf("mempool length after MaybeAttest = %d, want 1 (the attestation tx)", got)
+	}
+
+	// Calling again before the attestation is ever mined must not resubmit
+	// a duplicate (see lastAttestedHeight's own doc comment).
+	if err := n.MaybeAttest(); err != nil {
+		t.Fatalf("MaybeAttest (second call): %v", err)
+	}
+	if got := n.MempoolLen(); got != 1 {
+		t.Fatalf("mempool length after second MaybeAttest = %d, want still 1 (no duplicate submission)", got)
+	}
+}
+
+// TestMaybeAttestNoOpBeforeCheckpointHeight proves MaybeAttest does nothing
+// (no error, no mempool growth) before the chain has actually reached a
+// checkpoint height.
+func TestMaybeAttestNoOpBeforeCheckpointHeight(t *testing.T) {
+	a := newKeyT(t)
+	miner := newKeyT(t)
+	info, blsKey := testValidatorInfo(t, miner.Address(), 100)
+	n, err := New(Config{
+		MinerKey:        miner,
+		GenesisAlloc:    map[core.Address]uint64{a.Address(): 1000},
+		ConsensusMode:   consensus.PoS,
+		Validators:      []pos.ValidatorInfo{info},
+		ValidatorBLSKey: blsKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	if _, err := n.ProposeBlock(); err != nil {
+		t.Fatalf("ProposeBlock: %v", err)
+	}
+	if err := n.MaybeAttest(); err != nil {
+		t.Fatalf("MaybeAttest: %v", err)
+	}
+	if got := n.MempoolLen(); got != 0 {
+		t.Fatalf("mempool length = %d, want 0 (height 1 is not a checkpoint)", got)
+	}
+}
