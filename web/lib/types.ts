@@ -9,7 +9,9 @@ export interface ChainHead {
 }
 
 // HeaderJSON (rpc/server.go type HeaderJSON). The large u64 fields (height,
-// nonce) are decimal strings on the wire; the rest stay numbers.
+// nonce, baseFee, gasUsed -- the latter two added M9) are decimal strings on
+// the wire; the rest stay numbers. proposerSig is a hex string (M8), empty
+// for a PoW block.
 export interface HeaderJSON {
   height: string;
   prevHash: string;
@@ -19,11 +21,15 @@ export interface HeaderJSON {
   timestamp: number;
   difficulty: number;
   nonce: string;
+  baseFee: string;
+  gasUsed: string;
+  proposerSig: string;
 }
 
 // TxJSON (rpc/server.go type TxJSON). Data/Signature are hex strings (no 0x);
-// value/nonce/gasLimit/chainId are DECIMAL STRINGS (Go `,string` tags) so the
-// browser never loses precision above 2^53.
+// value/nonce/gasLimit/chainId/gasFeeCap/gasTipCap (the latter two added M9)
+// are DECIMAL STRINGS (Go `,string` tags) so the browser never loses
+// precision above 2^53.
 export interface TxJSON {
   from: string;
   to: string;
@@ -31,6 +37,8 @@ export interface TxJSON {
   nonce: string;
   gasLimit: string;
   chainId: string;
+  gasFeeCap: string;
+  gasTipCap: string;
   data: string;
   signature: string;
   hash: string;

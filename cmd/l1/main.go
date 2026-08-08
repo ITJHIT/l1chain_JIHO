@@ -9,8 +9,15 @@
 //	    own PoW itself, and verifies the proof locally instead of trusting
 //	    the node's plain answer.
 //
-//	l1 send --key <hex> --to <hex> --value <n> --rpc <url>
-//	    Build, sign, and submit a value transfer over JSON-RPC.
+//	l1 send --key <hex> --to <hex> --value <n> --rpc <url> [--max-fee <n> --max-priority-fee <n>]
+//	    Build, sign, and submit a value transfer over JSON-RPC. --max-fee
+//	    (GasFeeCap) and --max-priority-fee (GasTipCap) set the M9 fee-market
+//	    fields on the transaction; both default to 0 and, since this command
+//	    only ever builds a plain transfer (fee-exempt by this chain's own
+//	    design -- see chain/transition.go's applyTxAtSession), have no effect
+//	    on it today. They exist so the wire-level Transaction this command
+//	    produces is never missing a field a contract/EVM-calling client
+//	    would need, not because a plain transfer is priced.
 //
 //	l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> \
 //	        --difficulty <n> --alloc <addrHex:amount,...> --base-alloc <addrHex:amount,...> \
@@ -115,7 +122,7 @@ func usage() {
 Usage:
   l1 wallet new
   l1 balance --addr <hex> --rpc <url> [--verify]
-  l1 send --key <hex> --to <hex> --value <n> --rpc <url>
+  l1 send --key <hex> --to <hex> --value <n> --rpc <url> [--max-fee <n> --max-priority-fee <n>]
   l1 node --db <path> --rpc-addr <host:port> --miner-key <hex> --difficulty <n> --alloc <addrHex:amt,...> --base-alloc <addrHex:amt,...> --mine-interval <dur> [--consensus pow|pos --validators <addrHex:blsPubKeyHex:stake,...> --validator-bls-key <hex> --slot-interval <dur>]`)
 }
 
@@ -220,6 +227,8 @@ func cmdSend(args []string) error {
 	value := fs.Uint64("value", 0, "amount to transfer")
 	nonce := fs.Int64("nonce", -1, "sender nonce (default: query via RPC)")
 	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint URL")
+	maxFee := fs.Uint64("max-fee", 0, "GasFeeCap (M9): max total price per gas unit the sender will pay -- only consulted for contract/EVM transactions; a plain transfer (all this command ever builds) is fee-exempt and ignores it")
+	maxPriorityFee := fs.Uint64("max-priority-fee", 0, "GasTipCap (M9): priority fee per gas unit offered to the block producer -- see --max-fee's own note")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -249,11 +258,13 @@ func cmdSend(args []string) error {
 	}
 
 	tx := core.Transaction{
-		To:       toAddr,
-		Value:    *value,
-		Nonce:    txNonce,
-		GasLimit: 21000,
-		ChainID:  chain.DefaultChainID,
+		To:        toAddr,
+		Value:     *value,
+		Nonce:     txNonce,
+		GasLimit:  21000,
+		ChainID:   chain.DefaultChainID,
+		GasFeeCap: *maxFee,
+		GasTipCap: *maxPriorityFee,
 	}
 	key.Sign(&tx)
 

@@ -72,6 +72,10 @@ function TxLookup() {
             <div>{tx.nonce}</div>
             <div>gasLimit</div>
             <div>{tx.gasLimit}</div>
+            <div>gasFeeCap</div>
+            <div>{tx.gasFeeCap}</div>
+            <div>gasTipCap</div>
+            <div>{tx.gasTipCap}</div>
             <div>data</div>
             <div className="mono">{tx.data || "(empty)"}</div>
             <div>signature</div>

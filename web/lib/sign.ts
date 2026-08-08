@@ -10,10 +10,13 @@ import type { TxJSON } from "./types";
 //
 // Transaction SigningHash (core/transaction.go preimage(withSig=false)):
 //   From(20) || To(20) || Value(u64 BE) || Nonce(u64 BE) || GasLimit(u64 BE) ||
-//   ChainID(u64 BE) || Data
+//   ChainID(u64 BE) || GasFeeCap(u64 BE) || GasTipCap(u64 BE) || Data
 //   then SHA-256 of that preimage. ChainID sits at a FIXED position right after
 //   GasLimit and before Data, byte-for-byte matching core/transaction.go, so the
 //   signature commits to the chain id (replay protection across chains).
+//   GasFeeCap/GasTipCap (M9) sit right after ChainID, signed over the same way
+//   -- a sender commits to its own fee ceiling and priority offer; neither can
+//   be tampered with post-signature, exactly like every other field here.
 //
 // Signature (wallet/wallet.go Key.Sign -> dcrd ecdsa.SignCompact(priv, hash, true)):
 //   65 bytes: [recovery byte][R(32)][S(32)]
@@ -69,6 +72,8 @@ export interface UnsignedTx {
   nonce: bigint;
   gasLimit: bigint;
   chainId?: bigint; // defaults to CHAIN_ID when omitted
+  gasFeeCap?: bigint; // M9, GasFeeCap: defaults to 0n (fee-exempt paths ignore it)
+  gasTipCap?: bigint; // M9, GasTipCap: defaults to 0n (see gasFeeCap's own note)
   data?: Uint8Array;
 }
 
@@ -84,6 +89,8 @@ function signingPreimage(from: Uint8Array, tx: UnsignedTx): Uint8Array {
     u64be(tx.nonce),
     u64be(tx.gasLimit),
     u64be(tx.chainId ?? CHAIN_ID),
+    u64be(tx.gasFeeCap ?? 0n),
+    u64be(tx.gasTipCap ?? 0n),
     data,
   ];
   const total = parts.reduce((a, p) => a + p.length, 0);
@@ -122,6 +129,8 @@ export async function signTx(privHex: string, tx: UnsignedTx): Promise<TxJSON> {
     nonce: tx.nonce.toString(),
     gasLimit: tx.gasLimit.toString(),
     chainId: (tx.chainId ?? CHAIN_ID).toString(),
+    gasFeeCap: (tx.gasFeeCap ?? 0n).toString(),
+    gasTipCap: (tx.gasTipCap ?? 0n).toString(),
     data: bytesToHex(data),
     signature: bytesToHex(sig65),
     hash: "", // recomputed server-side; TxFromJSON ignores it
