@@ -1,0 +1,149 @@
+{
+  "kind": "algorithm-adversarial-report",
+  "milestone": "M9",
+  "title": "M9 EIP-1559-style fee market -- regression sweep + adversarial test report",
+  "module": "l1chain",
+  "generated": "2026-08-08",
+  "lane": "executor-qa-red-team (21-M4RedTeam lineage), extended to the fee-market path added across PR1-PR9 (#46-#54, M9 milestone)",
+  "target": "chain.ComputeBaseFee/EffectiveGasPrice (chain/feemarket.go), Chain.AddBlock's BaseFee/GasUsed/GasLimit validation, applyContractTx/applyEVMTx's fee accounting (chain/transition.go, chain/evm_wiring.go), and Chain.BuildBlockTxs (chain/blockbuilder.go) -- the real base-fee computation, per-transaction fee charging, and block-construction path a node actually mines/validates through, replacing the flat chain.GasPrice=1 constant M1-M8 used.",
+  "test_packages": ["l1chain/chain"],
+  "test_files": ["chain/feemarket_adversarial_test.go", "chain/feemarket.go", "chain/feemarket_test.go", "chain/feemarket_wiring_test.go", "chain/blockbuilder.go", "chain/blockbuilder_test.go", "chain/transition.go", "chain/evm_wiring.go", "chain/evm_wiring_test.go", "chain/chain.go"],
+  "production_code_modified": false,
+  "principle": "Three cases not already exercised by a required wiring-PR test, cited by name rather than duplicated: base-fee determinism across independent chains (TestBaseFeeAgreesAcrossIndependentChains, PR5), fee-cap/tip-cap validity (TestTxWithFeeCapBelowBaseFeeRejected/TestTxWithTipExceedingFeeCapRejected, PR5), elasticity direction (TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock, PR6), a single over-limit transaction (TestBlockExceedingGasLimitRejected, PR6), GasUsed honesty (TestBadGasUsedRejected, PR6), the BASEFEE opcode (TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee, PR7), burn/tip balance conservation (TestFeeSplitBurnsBaseCreditsTipToCoinbase, PR8), and block-builder tip-ordering plus nonce safety (TestBlockBuilderPrefersHigherTipRespectsNonceOrder/TestBlockBuilderNonceOrderBlocksLaterFreePassTx, PR8) are all already required, non-negotiable tests written and proven passing in their own wiring PRs. This report's own three NEW cases attack the boundaries those required tests don't reach: the exact BaseFee==GasFeeCap boundary (a strict-less-than check, proven at the wired-consensus level, not just the pure EffectiveGasPrice function); the block gas cap enforced on the SUM of actual usage across multiple transactions rather than any single one's declared limit; and the block builder's own GasFeeCap<BaseFee 'priced out' deactivation branch, which neither existing required block-builder test happens to exercise (one runs at BaseFee 0, so nothing can ever be priced out; the other tests the separate gas-budget-exceeded branch).",
+  "new_test_names": [
+    "TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable",
+    "TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx",
+    "TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers"
+  ],
+  "adversarial_cases": [
+    {
+      "id": "case-1",
+      "test": "TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable",
+      "scenario": "A real chain with a nonzero Genesis.InitialBaseFee; a contract-deploy transaction whose GasFeeCap is set to EXACTLY the chain's own real NextBaseFee() for the block it lands in (zero headroom, zero possible priority fee) -- mined via CandidateStateRoot+PoW and validated via AddBlock, the actual wired-consensus path.",
+      "expected": "AddBlock accepts the block (GasFeeCap == BaseFee is includable; EffectiveGasPrice's own check is a strict less-than, not less-than-or-equal) and the transaction is genuinely applied (sender nonce advances to 1), not silently skipped.",
+      "verdict": "passed",
+      "receipt_evidence": "CI run https://github.com/ITJHIT/l1chain_JIHO/actions/runs/31255835687 job 93098928991 (temporary verbose step, reverted after, same one-off pattern M4/M6/M7/M8 used): '=== RUN   TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable' / '--- PASS: TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable (0.00s)'."
+    },
+    {
+      "id": "case-2",
+      "test": "TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx",
+      "scenario": "Chain.gasLimit set to 40,000; two StackVM contract deploys in the SAME block, each costing exactly vm.GasCreate=32,000 (comfortably under the 40,000 cap individually), but summing to 64,000 -- built via CandidateStateRoot (which does not itself enforce the gas cap) and submitted to AddBlock.",
+      "expected": "AddBlock rejects the block with ErrBlockGasLimitExceeded, proving the cap is checked against the block's total actual gas consumption, not any individual transaction's own usage.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx' / '--- PASS: TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx (0.00s)'."
+    },
+    {
+      "id": "case-3",
+      "test": "TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers",
+      "scenario": "Three independent senders' fee-priced transactions submitted to Chain.BuildBlockTxs directly: one (senderLow) with GasFeeCap one unit below the chain's real current BaseFee (priced out), two others (senderMid, senderHigh) with comfortable headroom and distinct tips.",
+      "expected": "BuildBlockTxs returns exactly 2 transactions -- senderLow's excluded, senderMid's and senderHigh's both included -- proving a priced-out sender's exclusion is fully independent and does not corrupt or block selection for other, unrelated senders.",
+      "verdict": "passed",
+      "receipt_evidence": "Same CI run: '=== RUN   TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers' / '--- PASS: TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers (0.00s)'."
+    }
+  ],
+  "summary": {
+    "total_cases": 3,
+    "passed": 3,
+    "failed": 0,
+    "defects_found": 0,
+    "note": "No case in this report's own new suite (PR10) revealed a defect -- all three passed on their first real CI run. For full milestone honesty: this milestone's real defects were caught and fixed earlier, before any adversarial pass reached this report. During PR5's own wiring, chain_test.go's shared buildBlock/replayBranch test helpers were found computing their own mining-side StateRoot via the public ApplyTx, which deliberately discards the new M9 tip return value -- while AddBlock's real validation path credits BlockReward + tip. Once the migrated adversarial/contract test helpers started carrying a nonzero GasTipCap, the two computations silently diverged (a real 'state root mismatch' CI failure), fixed by having both helpers call applyTxAtSession directly and credit the real tip. During PR8's own wiring, Chain.BuildBlockTxs's outer loop used active[addr] = false to mark a sender done instead of delete(active, addr) -- since len(active) counts map KEYS, not how many are true, and a key was never removed, the loop never terminated once ANY sender was deactivated for any reason, including the ordinary 'sender's queue fully drained' success path. This meant BuildBlockTxs hung on essentially any non-empty mempool. Caught via real CI evidence, not inspection: two separate CI runs on the PR8 branch hung past 5-9 minutes (versus the normal ~2-3), a temporary timeout-bounded diagnostic step was added to isolate it, and the resulting goroutine stack dump pinpointed the exact hanging line, confirming the fix (delete instead of false-assignment in all four call sites) before merge. Both temporary diagnostics were reverted before their respective merges; both fixes are verified by the now-green, normal-duration CI runs on main.",
+    "regression_sweep": "The same `go test -count=1 ./...` CI run this report's own evidence comes from also exercises the full pre-existing ~17-package suite (chain, cmd/l1, consensus, core, evm, evm/adapter, exchange, node, p2p, pos, redteam, rpc, state, store, trie, vm, wallet) unchanged -- confirming, by direct CI evidence rather than argument alone, that replacing the M1-M8 flat GasPrice=1 constant with real per-transaction GasFeeCap/GasTipCap pricing left every migrated PoW/PoS/EVM test byte-for-byte green. In particular l1chain/chain (100+ pre-existing tests plus M8's own PoS suite) and l1chain/redteam (M4-M7's own adversarial suites) both report 'ok' in the same run as this report's new fee-market cases."
+  },
+  "acceptance": {
+    "go_vet": { "command": "go vet ./...", "result": "pass" },
+    "go_test_feemarket_verbose": {
+      "command": "go test -v -count=1 -run 'TestGasTarget|TestComputeBaseFee|TestValidateFeeCapTip|TestEffectiveGasPrice|TestBaseFeeAgreesAcrossIndependentChains|TestTxWithFeeCapBelowBaseFeeRejected|TestTxWithTipExceedingFeeCapRejected|TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock|TestBlockExceedingGasLimitRejected|TestBadGasUsedRejected|TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee|TestFeeSplitBurnsBaseCreditsTipToCoinbase|TestBlockBuilderPrefersHigherTipRespectsNonceOrder|TestBlockBuilderNonceOrderBlocksLaterFreePassTx|TestBlockBuilderFreePassUnboundedAndOrderPreserved|TestAdvFeeMarket' ./chain/",
+      "note": "Run as a one-off temporary CI step (this dev environment has no local Go toolchain) solely to capture real per-test evidence for this report; the step was reverted immediately after in the same PR (#55) before merge and does not appear in the merged workflow.",
+      "result": "pass",
+      "raw": [
+        "=== RUN   TestFeeSplitBurnsBaseCreditsTipToCoinbase",
+        "--- PASS: TestFeeSplitBurnsBaseCreditsTipToCoinbase (0.00s)",
+        "=== RUN   TestBlockBuilderPrefersHigherTipRespectsNonceOrder",
+        "--- PASS: TestBlockBuilderPrefersHigherTipRespectsNonceOrder (0.00s)",
+        "=== RUN   TestBlockBuilderNonceOrderBlocksLaterFreePassTx",
+        "--- PASS: TestBlockBuilderNonceOrderBlocksLaterFreePassTx (0.00s)",
+        "=== RUN   TestBlockBuilderFreePassUnboundedAndOrderPreserved",
+        "--- PASS: TestBlockBuilderFreePassUnboundedAndOrderPreserved (0.00s)",
+        "=== RUN   TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee",
+        "--- PASS: TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee (0.00s)",
+        "=== RUN   TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable",
+        "--- PASS: TestAdvFeeMarket01ExactBaseFeeBoundaryIncludable (0.00s)",
+        "=== RUN   TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx",
+        "--- PASS: TestAdvFeeMarket02BlockGasLimitEnforcedOnSumNotPerTx (0.00s)",
+        "=== RUN   TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers",
+        "--- PASS: TestAdvFeeMarket03BlockBuilderExcludesPricedOutSenderKeepsOthers (0.00s)",
+        "=== RUN   TestGasTarget",
+        "--- PASS: TestGasTarget (0.00s)",
+        "=== RUN   TestComputeBaseFeeUnchangedAtExactTarget",
+        "--- PASS: TestComputeBaseFeeUnchangedAtExactTarget (0.00s)",
+        "=== RUN   TestComputeBaseFeeRisesAboveTarget",
+        "--- PASS: TestComputeBaseFeeRisesAboveTarget (0.00s)",
+        "=== RUN   TestComputeBaseFeeFallsBelowTarget",
+        "--- PASS: TestComputeBaseFeeFallsBelowTarget (0.00s)",
+        "=== RUN   TestComputeBaseFeeRiseGuaranteesAtLeastOneUnit",
+        "--- PASS: TestComputeBaseFeeRiseGuaranteesAtLeastOneUnit (0.00s)",
+        "=== RUN   TestComputeBaseFeeNeverReachesZeroFromNonzeroStart",
+        "--- PASS: TestComputeBaseFeeNeverReachesZeroFromNonzeroStart (0.00s)",
+        "=== RUN   TestComputeBaseFeeZeroTargetOrBaseFeeIsNoOp",
+        "--- PASS: TestComputeBaseFeeZeroTargetOrBaseFeeIsNoOp (0.00s)",
+        "=== RUN   TestComputeBaseFeeMovesAtMostOneEighth",
+        "--- PASS: TestComputeBaseFeeMovesAtMostOneEighth (0.00s)",
+        "=== RUN   TestValidateFeeCapTip",
+        "--- PASS: TestValidateFeeCapTip (0.00s)",
+        "=== RUN   TestEffectiveGasPriceCapsAtHeadroom",
+        "--- PASS: TestEffectiveGasPriceCapsAtHeadroom (0.00s)",
+        "=== RUN   TestEffectiveGasPriceTipFullyPaidWhenHeadroomAllows",
+        "--- PASS: TestEffectiveGasPriceTipFullyPaidWhenHeadroomAllows (0.00s)",
+        "=== RUN   TestEffectiveGasPriceRejectsFeeCapBelowBaseFee",
+        "--- PASS: TestEffectiveGasPriceRejectsFeeCapBelowBaseFee (0.00s)",
+        "=== RUN   TestEffectiveGasPriceFeeCapEqualsBaseFeeMeansZeroTip",
+        "--- PASS: TestEffectiveGasPriceFeeCapEqualsBaseFeeMeansZeroTip (0.00s)",
+        "=== RUN   TestBaseFeeAgreesAcrossIndependentChains",
+        "--- PASS: TestBaseFeeAgreesAcrossIndependentChains (0.00s)",
+        "=== RUN   TestTxWithFeeCapBelowBaseFeeRejected",
+        "--- PASS: TestTxWithFeeCapBelowBaseFeeRejected (0.00s)",
+        "=== RUN   TestTxWithTipExceedingFeeCapRejected",
+        "--- PASS: TestTxWithTipExceedingFeeCapRejected (0.00s)",
+        "=== RUN   TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock",
+        "--- PASS: TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock (0.00s)",
+        "=== RUN   TestBlockExceedingGasLimitRejected",
+        "--- PASS: TestBlockExceedingGasLimitRejected (0.00s)",
+        "=== RUN   TestBadGasUsedRejected",
+        "--- PASS: TestBadGasUsedRejected (0.00s)",
+        "PASS"
+      ]
+    },
+    "go_test_all_summary": {
+      "command": "go test -count=1 ./...",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/chain\t0.725s",
+        "ok  \tl1chain/cmd/l1\t4.898s",
+        "ok  \tl1chain/consensus\t0.012s",
+        "ok  \tl1chain/core\t0.003s",
+        "ok  \tl1chain/evm\t0.025s",
+        "ok  \tl1chain/evm/adapter\t0.010s",
+        "ok  \tl1chain/exchange\t0.003s",
+        "ok  \tl1chain/node\t0.215s",
+        "ok  \tl1chain/p2p\t43.684s",
+        "ok  \tl1chain/pos\t0.035s",
+        "ok  \tl1chain/redteam\t0.022s",
+        "ok  \tl1chain/rpc\t0.035s",
+        "ok  \tl1chain/state\t0.003s",
+        "ok  \tl1chain/store\t0.042s",
+        "ok  \tl1chain/trie\t0.005s",
+        "ok  \tl1chain/vm\t0.038s",
+        "ok  \tl1chain/wallet\t0.023s",
+        "source: https://github.com/ITJHIT/l1chain_JIHO/actions/runs/31255835687 job 93098928991, step 'Test'"
+      ]
+    },
+    "race_detector": {
+      "command": "go test -race -count=1 ./node/ ./p2p/",
+      "result": "pass",
+      "raw": [
+        "ok  \tl1chain/node\t2.254s",
+        "ok  \tl1chain/p2p\t46.109s"
+      ]
+    }
+  }
+}
