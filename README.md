@@ -53,11 +53,13 @@ _The "Browser-signed send" shot shows a recipient credited 1234 by a transaction
 | **M6** | Genesis base-asset premine closing the on-chain exchange's last gap (a real crossing trade proven over the full `node.New` → RPC → `MineBlock` round trip); DHT peer discovery + circuit-relay-v2 P2P; real solc-compiled OpenZeppelin ERC20 + precompile calls through the EVM harness, frozen with CI-verified drift detection | ✅ done |
 | **M7** | EVM/MPT unification: a new `evm/adapter` package bridges l1chain's own real SHA-256 MPT `state.StateDB` to go-ethereum's full 39-method `vm.StateDB` (snapshots/revert, refunds, self-destruct incl. EIP-6780, transient storage, access lists, `Finalise`), wired directly into `chain/transition.go` — a deployed EVM contract (`evm.DeployAddress`, magic-tag-dispatched) now executes as real chain consensus, not just an isolated harness. Two fully independent `*Chain` instances (one mining via `CandidateStateRoot`, one only ever validating via `AddBlock`) proven to agree on state root over a real EVM workload (a real solc-compiled ERC20 deploy, a nested call with a genuine mid-call revert, a same-tx self-destruct) | ✅ done |
 | **M8** | Full Proof-of-Stake consensus mode, additive alongside PoW (a genesis-fixed choice, mirroring the on-chain exchange's own mode switch — PoW stays the default and every pre-existing PoW test is unaffected). Real stake-weighted block production (not a finality overlay on unchanged PoW blocks): BLS12-381 (`blst`) validator signing and aggregable checkpoint attestations, deterministic stake-weighted proposer selection, a finality gate that runs *before* the heaviest-chain reorg rule and rejects any competing branch once ≥2/3 of stake has finalized a checkpoint — even if that branch is nominally heavier — and equivocation detection (double-propose, double-attest) that jails a validator out of future proposer/attestation eligibility. See [Proof-of-Stake consensus](#proof-of-stake-consensus) below | ✅ done |
+| **M9** | A real EIP-1559-style fee market for contract/EVM transactions: a per-block `BaseFee` that auto-adjusts toward a gas target (the same recurrence formula real EIP-1559 uses — denominator 8, elasticity 2×) and is independently re-derived and validated by every node from the parent header, never chosen freely by a miner/proposer; the base-fee portion of every payment is burned, the priority-fee portion goes to the block's `Coinbase` as a tip on top of `BlockReward`; a new `Chain.BuildBlockTxs` block builder that actually selects transactions by tip instead of dumping the whole mempool, always respecting per-sender nonce order. Applies identically under PoW or PoS (a state-transition concern, not a consensus-mode one). See [Fee market](#fee-market) below | ✅ done |
 
 ## Features
 
 - **Consensus** — dual-mode, chosen once at genesis and never touched again (same shape as the on-chain exchange's own mode switch): Bitcoin-style Proof-of-Work by default (leading-zero-bit targets, difficulty retargeting toward a ~10s block interval, longest-(heaviest-)chain reorg with full state replay), or a full Proof-of-Stake mode (M8) — deterministic stake-weighted proposers, BLS12-381 aggregable attestations, and ≥2/3-stake finality. See [Proof-of-Stake consensus](#proof-of-stake-consensus) below.
 - **Native coin** — account/balance model, ECDSA secp256k1 signatures, genesis allocation, fixed block reward (coinbase credited into canonical state), infinite supply.
+- **Fee market** — a real EIP-1559-style `BaseFee` (M9) for contract/EVM transactions: auto-adjusts toward a gas target every block, burned on payment; a priority fee (tip) goes to the block producer on top of the fixed reward. See [Fee market](#fee-market) below.
 - **P2P** — real `go-libp2p` hosts over TCP, GossipSub for block/tx propagation, a `/l1/sync/1.0.0` stream protocol for catch-up sync, bounded (deadlines + size caps, a connection-count watermark, and an inbound-sync-stream cap as of M5) against slow/malicious/many-sybil peers. Blocks from the network are **never trusted** — every one is re-validated through `chain.AddBlock`.
 - **Smart contracts** — a from-scratch stack VM (M3) with Ethereum-numbered opcodes, gas, out-of-gas revert, and CALL depth limits; plus an embedded go-ethereum EVM (M4) that deploys and runs a standard ERC-20 with keccak-derived mapping storage.
 - **Tooling** — JSON-RPC (`getChainHead`, `getBlockByHeight`, `getBalance`, `sendRawTx`, `getTxByHash`, `getOrderBookDepth`, `getOrderBook`, `getLastAuction`, `getExchangeBalance`, `getAccountProof`, `getStorageProof`), a CLI (`wallet`/`balance` [`--verify` for a real light-client check, not a trusted `getBalance`]/`send`/`node`), and a Next.js explorer with **in-browser secp256k1 signing** (a browser-signed tx is accepted verbatim by the Go verifier) plus a live `/exchange` order-book view.
@@ -79,6 +81,12 @@ go run ./cmd/l1 wallet new
 go run ./cmd/l1 balance --addr <hex> --rpc http://127.0.0.1:8545
 go run ./cmd/l1 send --key <priv-hex> --to <addr> --value 100 --rpc http://127.0.0.1:8545
 ```
+
+`send` also accepts `--max-fee`/`--max-priority-fee` (M9, `GasFeeCap`/`GasTipCap`) so
+the transaction it builds is never missing a wire field a contract/EVM-calling
+client would need — but `send` itself only ever builds a plain transfer, which
+is fee-exempt (see [Fee market](#fee-market) below), so they have no effect on
+what `send` actually does today.
 
 ### Multi-node (real libp2p)
 
@@ -193,6 +201,7 @@ Each milestone was adversarially red-teamed; the reports live in [`artifacts/`](
 - `m6-evm-solc-redteam-report.json` — real solc-compiled OpenZeppelin ERC20 deploy/mint/transfer with a real `Transfer` event and a real `Ownable` revert path, plus a real precompile-0x1 (`ecrecover`) call, both through genuine solc bytecode with CI-verified drift detection against the source
 - `m7-evm-unification-redteam-report.json` — out-of-gas deploy, revert integrity, reentrancy bound, and cross-chain deterministic root, all proven at the real wired-consensus EVM path (`chain.ApplyTxAt`/`AddBlock`, not just the standalone harness M4/M6 exercised)
 - `m8-pos-redteam-report.json` — forged proposer signature (correct claimed identity, wrong/garbage signature) and forged attestation signature both rejected; plus the four required PoS wiring-PR safety tests cited by name (wrong-proposer block, finality gate rejecting a nominally-heavier conflicting branch, double-propose jailing, double-attest jailing), all real CI evidence from the same run that proves the full pre-existing PoW suite unaffected
+- `m9-fee-market-redteam-report.json` — a transaction exactly at the `BaseFee` boundary (zero headroom, still includable), the block gas cap enforced on the *sum* of actual usage across multiple transactions rather than any single one's, and the block builder's priced-out-sender exclusion proven not to corrupt selection for other senders; plus the eight required fee-market wiring-PR tests cited by name, all real CI evidence from the same run that proves the full pre-existing M1-M8 suite unaffected
 
 ## Design notes
 
@@ -355,6 +364,78 @@ above for a runnable example.
   restarted one can end up with slightly different finality/jailing state,
   specifically for attestations that were only ever included in a since-
   orphaned block.
+
+## Fee market
+
+A real EIP-1559-style fee market, applying to contract/EVM transactions —
+the two transaction shapes that already had a gas concept before M9. Plain
+transfers, on-chain exchange orders, and PoS checkpoint attestations remain
+exactly as fee-exempt as they always were; extending metered pricing to
+paths that never had a gas concept would be a separate, much larger economic
+redesign than "add EIP-1559 to the parts that already charge gas," not
+something M9 silently expanded into. Applies identically under PoW or PoS —
+the fee market is a state-transition concern, not a consensus-mode one.
+
+- **`BaseFee` is never chosen freely.** Every block's `Header.BaseFee` is
+  independently re-derived by `Chain.AddBlock` from the parent header
+  (`chain.ComputeBaseFee` — unchanged at exactly the gas target, moves by up
+  to 1/8 per block toward it, guaranteed to move by at least 1 unit when
+  above target so integer division can never stall the correction) and
+  rejected (`ErrBadBaseFee`) if a block's claimed value doesn't match — the
+  fee-market analog of the PoW/PoS proposer checks. The elasticity multiplier
+  (2×, same as real EIP-1559) means a block may go up to the full configured
+  gas cap before `BaseFee` starts correcting it back down.
+- **Every transaction pays a `GasFeeCap` (hard ceiling) and offers a
+  `GasTipCap` (priority fee)** — the real dual-fee structure, not a
+  single-price approximation. The actual price paid is
+  `BaseFee + min(GasTipCap, GasFeeCap - BaseFee)`
+  (`chain.EffectiveGasPrice`): the base-fee portion is burned — credited to
+  nobody, the same silent-vanish mechanism this chain already had for every
+  gas payment before M9, now an intentional, documented protocol rule — and
+  the priority-fee portion is credited to the block's `Coinbase` as a tip, on
+  top of the fixed `BlockReward`.
+- **`Chain.BuildBlockTxs` replaces "dump the entire mempool."** Every
+  plain-transfer/exchange/attestation transaction is still included
+  unconditionally (unbounded — a named, pre-existing limitation this
+  milestone doesn't change). Fee-priced transactions are greedily selected by
+  highest effective priority fee, bounded by the chain's configured gas cap,
+  always respecting each sender's own nonce order: a sender's queue is only
+  ever advanced from the front, never skipped into, so a transaction that is
+  priced out (`GasFeeCap` below `BaseFee`) or doesn't fit the remaining
+  budget blocks every *later* transaction from that same sender in this
+  block — including free-pass ones after it — exactly like a real
+  transaction pool must (skipping ahead would make the block fail
+  `AddBlock`'s own `ErrBadNonce` check).
+- **The `BASEFEE` opcode (0x48) is real for the embedded EVM**, closing a
+  limitation named since M7: `evm/adapter`'s `BlockContext.BaseFee` was
+  hardcoded to zero through M8; a contract now reads the same real,
+  consensus-agreed value `AddBlock` independently validated for that block.
+
+See [`m9-fee-market-redteam-report.json`](artifacts/m9-fee-market-redteam-report.json)
+for adversarial evidence (the exact `BaseFee` boundary, the gas cap enforced
+on a multi-transaction sum rather than any single transaction, priced-out
+senders not corrupting other senders' selection) plus the required
+safety-test citations, and the [PoS quickstart](#proof-of-stake-pos-mode)-adjacent
+`send` flags above for the (currently inert, since `send` only builds plain
+transfers) CLI surface.
+
+**Explicitly deferred for M9** (stated plainly, not silently avoided):
+
+- No miner-voted gas limit adjustment — the block gas cap is fixed for the
+  chain's entire life at genesis, unlike real Ethereum's slow ±1/1024-per-block
+  miner nudge.
+- No fee-pricing for plain transfers, exchange orders, or PoS attestations
+  (see this section's own scope note above) — these remain exactly as free
+  as they are today.
+- No EIP-2930 access lists, no EIP-4844 blob fees.
+- No mempool fee-bump replacement (resubmitting the same nonce at a higher
+  tip to displace a stuck transaction).
+- No receipt/`getTransactionReceipt` exposure of actual gas-used-per-transaction
+  — a pre-existing M7 gap (see [Hardening](#hardening-post-m4) below), not
+  newly closed here.
+- No block-count/byte limit for the non-fee-priced transaction types (plain
+  transfer/exchange/attestation) — the mempool's existing size cap is the
+  only bound, unchanged from before M9.
 
 ## Hardening (post-M4)
 
