@@ -21,6 +21,12 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -count=1 ./...
+      # TEMPORARY: captures real per-test evidence for the m9 fee-market
+      # redteam report (same one-off pattern M4/M6/M7/M8's reports used) --
+      # reverted in this same PR before merge, does not appear in the
+      # merged workflow.
+      - name: "TEMP: verbose evidence capture for M9 fee-market tests"
+        run: go test -v -count=1 -run 'TestGasTarget|TestComputeBaseFee|TestValidateFeeCapTip|TestEffectiveGasPrice|TestBaseFeeAgreesAcrossIndependentChains|TestTxWithFeeCapBelowBaseFeeRejected|TestTxWithTipExceedingFeeCapRejected|TestBaseFeeRisesAfterFullBlockFallsAfterEmptyBlock|TestBlockExceedingGasLimitRejected|TestBadGasUsedRejected|TestEVMBaseFeeOpcodeReflectsRealBlockBaseFee|TestFeeSplitBurnsBaseCreditsTipToCoinbase|TestBlockBuilderPrefersHigherTipRespectsNonceOrder|TestBlockBuilderNonceOrderBlocksLaterFreePassTx|TestBlockBuilderFreePassUnboundedAndOrderPreserved|TestAdvFeeMarket' ./chain/
       - name: Race detector (concurrency-sensitive packages)
         # gcc is available on ubuntu runners, so -race (cgo) works here
         # even though it is unavailable in the pure-Go dev sandbox.
