@@ -19,18 +19,7 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
-      # TEMPORARY: the full `go test ./...` step (below) has been observed
-      # hanging (CI run 31253808767, cancelled twice after 9+ and 5+
-      # minutes vs. the normal ~1-2 minutes) since M9 PR8's new
-      # Chain.BuildBlockTxs block builder. This step runs FIRST, isolated
-      # to chain/ and node/ (the packages PR8 touches), with -v and a hard
-      # -timeout so a genuine hang fails fast with a goroutine stack dump
-      # instead of the full suite hanging with no diagnostic output --
-      # reverted once the real hanging test is identified and fixed.
-      - name: "TEMP: isolate a possible hang in chain/node after PR8's block builder"
-        run: go test -v -count=1 -timeout=90s ./chain/... ./node/...
       - name: Test
-        timeout-minutes: 5
         run: go test -count=1 ./...
       - name: Race detector (concurrency-sensitive packages)
         # gcc is available on ubuntu runners, so -race (cgo) works here

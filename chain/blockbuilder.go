@@ -85,7 +85,7 @@ func (c *Chain) BuildBlockTxs(mempool []core.Transaction) []core.Transaction {
 			}
 			queuePos[addr] = i
 			if i >= len(queue) {
-				active[addr] = false
+				delete(active, addr) // len(active) must actually shrink, not just flip a value to false
 			}
 		}
 
@@ -106,7 +106,7 @@ func (c *Chain) BuildBlockTxs(mempool []core.Transaction) []core.Transaction {
 				// Not includable at the current price -- nonce order
 				// forbids skipping to a later, cheaper transaction from
 				// this same sender, so they're done for this block.
-				active[addr] = false
+				delete(active, addr)
 				continue
 			}
 			_, priorityFee, _ := EffectiveGasPrice(baseFee, tx.GasFeeCap, tx.GasTipCap)
@@ -127,7 +127,7 @@ func (c *Chain) BuildBlockTxs(mempool []core.Transaction) []core.Transaction {
 		if gasBudget+winner.tx.GasLimit > c.gasLimit {
 			// Doesn't fit -- skipping to a smaller transaction from this
 			// sender would violate nonce order, so they're done too.
-			active[winner.addr] = false
+			delete(active, winner.addr)
 			continue
 		}
 
@@ -135,7 +135,7 @@ func (c *Chain) BuildBlockTxs(mempool []core.Transaction) []core.Transaction {
 		gasBudget += winner.tx.GasLimit
 		queuePos[winner.addr]++
 		if queuePos[winner.addr] >= len(bySender[winner.addr]) {
-			active[winner.addr] = false
+			delete(active, winner.addr)
 		}
 	}
 
