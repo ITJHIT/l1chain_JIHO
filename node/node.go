@@ -481,8 +481,13 @@ func (n *Node) MineBlock() (core.Block, error) {
 	defer n.mu.Unlock()
 	head := n.chain.Head()
 	coinbase := n.miner.Address()
-	txs := make([]core.Transaction, len(n.mempool))
-	copy(txs, n.mempool)
+	// BuildBlockTxs (M9) selects a real subset -- every plain-transfer/
+	// exchange/attestation transaction unconditionally, fee-priced
+	// (contract/EVM) ones greedily by tip, bounded by the chain's gas
+	// limit and always respecting per-sender nonce order -- rather than
+	// dumping the entire mempool unconditionally, as every block before
+	// M9 did.
+	txs := n.chain.BuildBlockTxs(n.mempool)
 
 	stateRoot, gasUsed, err := n.deriveStateRoot(txs, coinbase)
 	if err != nil {
@@ -587,8 +592,13 @@ func (n *Node) ProposeBlock() (core.Block, error) {
 		return core.Block{}, ErrNoValidatorKey
 	}
 
-	txs := make([]core.Transaction, len(n.mempool))
-	copy(txs, n.mempool)
+	// BuildBlockTxs (M9) selects a real subset -- every plain-transfer/
+	// exchange/attestation transaction unconditionally, fee-priced
+	// (contract/EVM) ones greedily by tip, bounded by the chain's gas
+	// limit and always respecting per-sender nonce order -- rather than
+	// dumping the entire mempool unconditionally, as every block before
+	// M9 did.
+	txs := n.chain.BuildBlockTxs(n.mempool)
 
 	stateRoot, gasUsed, err := n.deriveStateRoot(txs, coinbase)
 	if err != nil {
